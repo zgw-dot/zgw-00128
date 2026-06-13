@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>冷链样本入库出库追踪系统</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f2f5; color: #1f2937; }
+
+.header { background: linear-gradient(135deg, #1e3a5f, #2563eb); color: white; padding: 16px 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 20px; font-weight: 600; }
+.header .nav { display: flex; gap: 4px; }
+.nav-btn { background: rgba(255,255,255,0.1); border: none; color: white; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+.nav-btn:hover { background: rgba(255,255,255,0.2); }
+.nav-btn.active { background: white; color: #1e3a5f; font-weight: 600; }
+
+.container { padding: 24px; max-width: 1400px; margin: 0 auto; }
+.page { display: none; }
+.page.active { display: block; }
+
+.card { background: white; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 20px; margin-bottom: 20px; }
+.card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #111827; display: flex; align-items: center; justify-content: space-between; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.stat-card { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-left: 4px solid #3b82f6; }
+.stat-card.warning { border-left-color: #f59e0b; }
+.stat-card.danger { border-left-color: #ef4444; }
+.stat-card.success { border-left-color: #10b981; }
+.stat-card.info { border-left-color: #6366f1; }
+.stat-label { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
+.stat-value { font-size: 28px; font-weight: 700; color: #111827; }
+
+.btn { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: #2563eb; color: white; }
+.btn-primary:hover { background: #1d4ed8; }
+.btn-success { background: #10b981; color: white; }
+.btn-success:hover { background: #059669; }
+.btn-warning { background: #f59e0b; color: white; }
+.btn-warning:hover { background: #d97706; }
+.btn-danger { background: #ef4444; color: white; }
+.btn-danger:hover { background: #dc2626; }
+.btn-secondary { background: #e5e7eb; color: #374151; }
+.btn-secondary:hover { background: #d1d5db; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 12px; text-align: left; border-bottom: 1px solid #f3f4f6; font-size: 14px; }
+th { background: #f9fafb; font-weight: 600; color: #374151; font-size: 13px; }
+tr:hover { background: #f9fafb; }
+
+.badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; display: inline-block; }
+.badge-pending { background: #fef3c7; color: #92400e; }
+.badge-in-storage { background: #d1fae5; color: #065f46; }
+.badge-outbound { background: #dbeafe; color: #1e40af; }
+.badge-scrapped { background: #fee2e2; color: #991b1b; }
+.badge-warning { background: #fef3c7; color: #92400e; }
+.badge-danger { background: #fee2e2; color: #991b1b; }
+
+.search-bar { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+.search-bar input, .search-bar select { padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; outline: none; }
+.search-bar input:focus, .search-bar select:focus { border-color: #2563eb; }
+.search-bar input { width: 240px; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000; }
+.modal-backdrop.active { display: flex; }
+.modal { background: white; border-radius: 12px; padding: 24px; width: 90%; max-width: 520px; max-height: 90vh; overflow-y: auto; }
+.modal h3 { font-size: 18px; margin-bottom: 20px; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 13px; color: #374151; margin-bottom: 6px; font-weight: 500; }
+.form-group input, .form-group select, .form-group textarea { width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; outline: none; font-family: inherit; }
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: #2563eb; }
+.form-group textarea { resize: vertical; min-height: 60px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+.detail-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 16px; }
+.detail-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.detail-info-item { padding: 12px; background: #f9fafb; border-radius: 8px; }
+.detail-info-item .label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+.detail-info-item .value { font-size: 15px; font-weight: 600; color: #111827; }
+.detail-info-item.highlight { background: #fef3c7; border-left: 3px solid #f59e0b; }
+.detail-info-item.danger { background: #fee2e2; border-left: 3px solid #ef4444; }
+.detail-info-item.success { background: #d1fae5; border-left: 3px solid #10b981; }
+
+.timeline { position: relative; padding-left: 30px; }
+.timeline::before { content: ''; position: absolute; left: 10px; top: 8px; bottom: 8px; width: 2px; background: #e5e7eb; }
+.timeline-item { position: relative; padding-bottom: 20px; }
+.timeline-item::before { content: ''; position: absolute; left: -25px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: #3b82f6; border: 3px solid white; box-shadow: 0 0 0 2px #e5e7eb; }
+.timeline-item.inbound::before { background: #10b981; }
+.timeline-item.transfer::before { background: #6366f1; }
+.timeline-item.outbound::before { background: #3b82f6; }
+.timeline-item.scrapped::before { background: #ef4444; }
+.timeline-item.temp_exception::before { background: #f59e0b; }
+.timeline-item.register::before { background: #9ca3af; }
+.timeline-time { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+.timeline-content { font-size: 14px; }
+.timeline-content .action { font-weight: 600; margin-right: 8px; }
+.timeline-content .remark { color: #6b7280; font-size: 13px; margin-top: 4px; }
+.timeline-content .temp { display: inline-block; background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px; }
+
+.config-section { margin-bottom: 24px; }
+.config-section h4 { font-size: 15px; margin-bottom: 12px; color: #111827; }
+.empty-state { text-align: center; padding: 40px; color: #9ca3af; font-size: 14px; }
+
+.alert { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+.alert-success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+.alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+.alert-warning { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+
+.action-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.location-tag { display: inline-block; padding: 2px 8px; background: #eff6ff; color: #1d4ed8; border-radius: 4px; font-size: 12px; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>❄️ 冷链样本入库出库追踪系统</h1>
+  <div class="nav">
+    <button class="nav-btn active" onclick="switchPage('dashboard')">台账概览</button>
+    <button class="nav-btn" onclick="switchPage('samples')">样本管理</button>
+    <button class="nav-btn" onclick="switchPage('config')">库位配置</button>
+  </div>
+</div>
+
+<div class="container">
+
+  <div id="page-dashboard" class="page active">
+    <div class="stats-grid">
+      <div class="stat-card info"><div class="stat-label">样本总数</div><div class="stat-value" id="stat-total">0</div></div>
+      <div class="stat-card success"><div class="stat-label">在库中</div><div class="stat-value" id="stat-in">0</div></div>
+      <div class="stat-card"><div class="stat-label">待入库</div><div class="stat-value" id="stat-pending">0</div></div>
+      <div class="stat-card"><div class="stat-label">已出库</div><div class="stat-value" id="stat-out">0</div></div>
+      <div class="stat-card"><div class="stat-label">已报废</div><div class="stat-value" id="stat-scrapped">0</div></div>
+      <div class="stat-card warning"><div class="stat-label">温控异常</div><div class="stat-value" id="stat-temp-exp">0</div></div>
+      <div class="stat-card danger"><div class="stat-label">温区不匹配</div><div class="stat-value" id="stat-zone-mismatch">0</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">⚠️ 风险样本预警</div>
+      <table id="risk-table">
+        <thead><tr><th>条码</th><th>批次号</th><th>名称</th><th>当前位置</th><th>要求温区</th><th>异常次数</th><th>问题</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📦 库位容量监控</div>
+      <table id="full-locations-table">
+        <thead><tr><th>库位编码</th><th>库位名称</th><th>温区</th><th>已用/容量</th><th>状态</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="page-samples" class="page">
+    <div class="card">
+      <div class="card-title">
+        <span>📋 样本列表</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="exportCSV()">📤 导出CSV</button>
+          <button class="btn btn-secondary btn-sm" onclick="showImportModal()">📥 批量导入</button>
+          <button class="btn btn-primary btn-sm" onclick="showAddModal()">➕ 新增样本</button>
+          <button class="btn btn-warning btn-sm" onclick="showBarcodeSearch()">🔍 条码查询</button>
+        </div>
+      </div>
+      <div class="search-bar">
+        <input type="text" id="search-keyword" placeholder="搜索条码/批次/名称..." oninput="loadSamples()">
+        <select id="search-status" onchange="loadSamples()">
+          <option value="all">全部状态</option>
+          <option value="pending">待入库</option>
+          <option value="in_storage">在库</option>
+          <option value="outbound">已出库</option>
+          <option value="scrapped">已报废</option>
+        </select>
+      </div>
+      <table id="samples-table">
+        <thead><tr><th>条码</th><th>批次号</th><th>名称</th><th>要求温区</th><th>当前位置</th><th>状态</th><th>预警</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="page-detail" class="page">
+    <div class="card">
+      <div class="detail-header">
+        <div>
+          <h2 id="detail-barcode" style="margin-bottom:8px;">条码</h2>
+          <div id="detail-batch" style="color:#6b7280;">批次号</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" onclick="switchPage('samples')">← 返回列表</button>
+          <button class="btn btn-success btn-sm" onclick="showInboundModal()" id="btn-inbound">入库</button>
+          <button class="btn btn-primary btn-sm" onclick="showTransferModal()" id="btn-transfer">转移</button>
+          <button class="btn btn-info btn-sm" onclick="showTempExceptionModal()" id="btn-temp-exp" style="background:#6366f1;color:white;">温控异常</button>
+          <button class="btn btn-warning btn-sm" onclick="showOutboundModal()" id="btn-outbound">出库</button>
+          <button class="btn btn-danger btn-sm" onclick="showScrapModal()" id="btn-scrap">报废</button>
+        </div>
+      </div>
+      <div class="detail-info" id="detail-info"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">📜 追踪时间线</div>
+      <div class="timeline" id="timeline"></div>
+    </div>
+  </div>
+
+  <div id="page-config" class="page">
+    <div class="card">
+      <div class="card-title">
+        <span>🌡️ 温区配置</span>
+        <button class="btn btn-primary btn-sm" onclick="showAddZoneModal()">➕ 新增温区</button>
+      </div>
+      <table id="zones-table">
+        <thead><tr><th>ID</th><th>名称</th><th>最低温度(℃)</th><th>最高温度(℃)</th><th>描述</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-title">
+        <span>📦 库位配置</span>
+        <button class="btn btn-primary btn-sm" onclick="showAddLocationModal()">➕ 新增库位</button>
+      </div>
+      <table id="locations-table">
+        <thead><tr><th>编码</th><th>名称</th><th>温区</th><th>容量</th><th>已用</th><th>描述</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<script>
+let currentSample = null;
+let currentSampleId = null;
+
+function api(path, options = {}) {
+  return fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+    body: options.body ? JSON.stringify(options.body) : undefined
+  }).then(r => r.json());
+}
+
+function switchPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  const pageId = name === 'detail' ? 'page-detail' : 'page-' + name;
+  document.getElementById(pageId).classList.add('active');
+  const btnMap = { dashboard: 0, samples: 1, config: 2 };
+  if (btnMap[name] !== undefined) {
+    document.querySelectorAll('.nav-btn')[btnMap[name]].classList.add('active');
+  }
+  if (name === 'dashboard') loadDashboard();
+  if (name === 'samples') loadSamples();
+  if (name === 'config') { loadZones(); loadLocations(); }
+}
+
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.remove('active');
+}
+
+function showModal(html) {
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-backdrop').classList.add('active');
+}
+
+function alertMsg(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = 'alert alert-' + type;
+  el.style.cssText = 'position:fixed;top:70px;right:20px;z-index:2000;max-width:360px;';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ---------- 台账 ----------
+function loadDashboard() {
+  api('/api/dashboard/stats').then(res => {
+    if (!res.success) return;
+    const d = res.data;
+    document.getElementById('stat-total').textContent = d.total;
+    document.getElementById('stat-in').textContent = d.inStorage;
+    document.getElementById('stat-pending').textContent = d.pending;
+    document.getElementById('stat-out').textContent = d.outbound;
+    document.getElementById('stat-scrapped').textContent = d.scrapped;
+    document.getElementById('stat-temp-exp').textContent = d.tempExceptions;
+    document.getElementById('stat-zone-mismatch').textContent = d.zoneMismatch;
+
+    const tbody = document.querySelector('#risk-table tbody');
+    if (d.recentRisks.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无风险样本</td></tr>';
+    } else {
+      tbody.innerHTML = d.recentRisks.map(s => {
+        const issues = [];
+        if (s.required_zone_id && s.zone_name !== s.required_zone_name) issues.push('温区不匹配');
+        if (s.exception_count > 0) issues.push(`${s.exception_count}次温控异常`);
+        return `<tr>
+          <td><strong>${s.barcode}</strong></td>
+          <td>${s.batch_no}</td>
+          <td>${s.name || '-'}</td>
+          <td>${s.location_code ? s.location_code + ' - ' + (s.zone_name||'') : '-'}</td>
+          <td>${s.required_zone_name || '-'}</td>
+          <td>${s.exception_count > 0 ? '<span class="badge badge-danger">' + s.exception_count + '</span>' : '0'}</td>
+          <td><span class="badge badge-warning">${issues.join('、')}</span></td>
+          <td><button class="btn btn-sm btn-primary" onclick="viewDetail(${s.id})">查看</button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    const locBody = document.querySelector('#full-locations-table tbody');
+    api('/api/locations').then(lres => {
+      if (!lres.success) return;
+      locBody.innerHTML = lres.data.map(l => {
+        const full = l.occupancy >= l.capacity;
+        return `<tr>
+          <td><strong>${l.code}</strong></td>
+          <td>${l.name}</td>
+          <td>${l.zone_name}</td>
+          <td>${l.occupancy} / ${l.capacity}</td>
+          <td>${full ? '<span class="badge badge-danger">已满</span>' : l.occupancy >= l.capacity * 0.8 ? '<span class="badge badge-warning">即将满</span>' : '<span class="badge badge-in-storage">正常</span>'}</td>
+        </tr>`;
+      }).join('');
+    });
+  });
+}
+
+// ---------- 样本列表 ----------
+function loadSamples() {
+  const kw = document.getElementById('search-keyword').value;
+  const st = document.getElementById('search-status').value;
+  const url = '/api/samples' + (kw || st !== 'all' ? '?' + new URLSearchParams({ keyword: kw, status: st }).toString() : '');
+  api(url).then(res => {
+    if (!res.success) return;
+    const tbody = document.querySelector('#samples-table tbody');
+    if (res.data.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无样本数据</td></tr>';
+      return;
+    }
+    tbody.innerHTML = res.data.map(s => {
+      const badgeClass = 'badge-' + s.status.replace('_', '-');
+      return `<tr>
+        <td><strong>${s.barcode}</strong></td>
+        <td>${s.batch_no}</td>
+        <td>${s.name || '-'}</td>
+        <td>${s.required_zone_name || '-'}</td>
+        <td>${s.location_code ? '<span class="location-tag">' + s.location_code + '</span> ' + (s.location_name||'') : '-'}</td>
+        <td><span class="badge ${badgeClass}">${s.status_label}</span></td>
+        <td>${s.has_warning ? '<span class="badge badge-warning">' + s.warning_msg + '</span>' : '-'}</td>
+        <td class="action-btns">
+          <button class="btn btn-sm btn-secondary" onclick="viewDetail(${s.id})">详情</button>
+          ${s.status === 'pending' ? `<button class="btn btn-sm btn-success" onclick="quickInbound(${s.id})">入库</button>` : ''}
+          ${s.status === 'in_storage' ? `<button class="btn btn-sm btn-primary" onclick="quickTransfer(${s.id})">转移</button> <button class="btn btn-sm btn-warning" onclick="quickOutbound(${s.id})">出库</button>` : ''}
+          ${s.status !== 'scrapped' && s.status !== 'outbound' ? `<button class="btn btn-sm btn-danger" onclick="quickScrap(${s.id})">报废</button>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+  });
+}
+
+function viewDetail(id) {
+  api('/api/samples/' + id).then(res => {
+    if (!res.success) { alertMsg(res.error, 'error'); return; }
+    currentSample = res.data;
+    currentSampleId = id;
+    renderDetail();
+    switchPage('detail');
+  });
+}
+
+function renderDetail() {
+  const s = currentSample;
+  document.getElementById('detail-barcode').textContent = s.barcode;
+  document.getElementById('detail-batch').textContent = '批次号: ' + s.batch_no;
+
+  const highlightClass = s.status === 'scrapped' ? 'danger' : (s.status === 'in_storage' ? 'success' : '');
+  let locationHtml = '';
+  if (s.status === 'in_storage' && s.location_code) {
+    locationHtml = `<div class="detail-info-item highlight"><div class="label">📍 当前位置（重点）</div><div class="value">${s.location_code} - ${s.location_name}</div><div style="font-size:12px;color:#92400e;margin-top:4px;">温区: ${s.zone_name || '-'}</div></div>`;
+  } else if (s.status === 'pending') {
+    locationHtml = `<div class="detail-info-item"><div class="label">📍 当前位置</div><div class="value">待入库</div></div>`;
+  } else if (s.status === 'outbound') {
+    locationHtml = `<div class="detail-info-item"><div class="label">📍 当前位置</div><div class="value">已出库</div></div>`;
+  } else if (s.status === 'scrapped') {
+    locationHtml = `<div class="detail-info-item danger"><div class="label">📍 当前状态</div><div class="value">已报废</div></div>`;
+  }
+
+  document.getElementById('detail-info').innerHTML = `
+    ${locationHtml}
+    <div class="detail-info-item ${highlightClass}"><div class="label">状态</div><div class="value">${s.status_label}</div></div>
+    <div class="detail-info-item"><div class="label">样本名称</div><div class="value">${s.name || '-'}</div></div>
+    <div class="detail-info-item"><div class="label">要求温区</div><div class="value">${s.required_zone_name || '未指定'}</div></div>
+    <div class="detail-info-item"><div class="label">创建时间</div><div class="value">${s.created_at}</div></div>
+    <div class="detail-info-item"><div class="label">更新时间</div><div class="value">${s.updated_at}</div></div>
+  `;
+
+  document.getElementById('btn-inbound').style.display = s.status === 'pending' ? '' : 'none';
+  document.getElementById('btn-transfer').style.display = s.status === 'in_storage' ? '' : 'none';
+  document.getElementById('btn-temp-exp').style.display = s.status === 'in_storage' ? '' : 'none';
+  document.getElementById('btn-outbound').style.display = s.status === 'in_storage' ? '' : 'none';
+  document.getElementById('btn-scrap').style.display = (s.status !== 'scrapped' && s.status !== 'outbound') ? '' : 'none';
+
+  const tl = document.getElementById('timeline');
+  if (s.timeline.length === 0) {
+    tl.innerHTML = '<div class="empty-state">暂无操作记录</div>';
+  } else {
+    tl.innerHTML = s.timeline.map(t => {
+      const fromTxt = t.from_code ? ` ${t.from_code} →` : '';
+      const toTxt = t.to_code ? ` ${t.to_code}` : '';
+      const tempTxt = t.temperature !== null ? `<span class="temp">${t.temperature}℃</span>` : '';
+      return `<div class="timeline-item ${t.action_type}">
+        <div class="timeline-time">${t.created_at}${t.operator ? ' · ' + t.operator : ''}</div>
+        <div class="timeline-content">
+          <span class="action">${t.action_label}</span>${fromTxt}${toTxt}${tempTxt}
+          ${t.remark ? `<div class="remark">备注: ${t.remark}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+  }
+}
+
+// ---------- 操作 ----------
+function showAddModal() {
+  api('/api/zones').then(res => {
+    const zones = res.success ? res.data : [];
+    showModal(`
+      <h3>新增样本登记</h3>
+      <div class="form-group"><label>条码 *</label><input id="add-barcode" placeholder="唯一条码"></div>
+      <div class="form-group"><label>批次号 *</label><input id="add-batch" placeholder="批次号"></div>
+      <div class="form-group"><label>样本名称</label><input id="add-name"></div>
+      <div class="form-group"><label>要求温区</label>
+        <select id="add-zone"><option value="">不指定</option>${zones.map(z=>`<option value="${z.id}">${z.name}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label>操作员</label><input id="add-operator" placeholder="选填"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="addSample()">确认登记</button>
+      </div>
+    `);
+  });
+}
+
+function addSample() {
+  const body = {
+    barcode: document.getElementById('add-barcode').value.trim(),
+    batch_no: document.getElementById('add-batch').value.trim(),
+    name: document.getElementById('add-name').value.trim(),
+    required_zone_id: document.getElementById('add-zone').value || null,
+    operator: document.getElementById('add-operator').value.trim() || 'system'
+  };
+  api('/api/samples', { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('登记成功'); closeModal(); loadSamples(); loadDashboard(); }
+    else alertMsg(res.error, 'error');
+  });
+}
+
+function quickInbound(id) {
+  currentSampleId = id;
+  showInboundModal();
+}
+function quickTransfer(id) {
+  currentSampleId = id;
+  showTransferModal();
+}
+function quickOutbound(id) {
+  currentSampleId = id;
+  showOutboundModal();
+}
+function quickScrap(id) {
+  currentSampleId = id;
+  showScrapModal();
+}
+
+function showInboundModal() {
+  api('/api/locations').then(res => {
+    if (!res.success) return;
+    const locs = res.data.filter(l => l.occupancy < l.capacity);
+    showModal(`
+      <h3>样本入库</h3>
+      <div class="form-group"><label>选择库位 *</label>
+        <select id="in-location">
+          ${locs.length === 0 ? '<option value="">无可用库位</option>' : locs.map(l => `<option value="${l.id}">${l.code} - ${l.name} (${l.zone_name}, ${l.occupancy}/${l.capacity})</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>备注</label><textarea id="in-remark"></textarea></div>
+      <div class="form-group"><label>操作员</label><input id="in-operator"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-success" onclick="doInbound()">确认入库</button>
+      </div>
+    `);
+  });
+}
+function doInbound() {
+  const body = {
+    location_id: parseInt(document.getElementById('in-location').value),
+    remark: document.getElementById('in-remark').value,
+    operator: document.getElementById('in-operator').value || 'system'
+  };
+  if (!body.location_id) { alertMsg('请选择库位', 'error'); return; }
+  api(`/api/samples/${currentSampleId}/inbound`, { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('入库成功'); closeModal(); loadSamples(); loadDashboard(); if (currentSample) viewDetail(currentSampleId); }
+    else alertMsg(res.error, res.warning ? 'warning' : 'error');
+  });
+}
+
+function showTransferModal() {
+  api('/api/locations').then(res => {
+    if (!res.success) return;
+    const locs = res.data.filter(l => l.occupancy < l.capacity);
+    showModal(`
+      <h3>样本转移</h3>
+      <div class="form-group"><label>目标库位 *</label>
+        <select id="tf-location">
+          ${locs.length === 0 ? '<option value="">无可用库位</option>' : locs.map(l => `<option value="${l.id}">${l.code} - ${l.name} (${l.zone_name}, ${l.occupancy}/${l.capacity})</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>备注</label><textarea id="tf-remark"></textarea></div>
+      <div class="form-group"><label>操作员</label><input id="tf-operator"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="doTransfer()">确认转移</button>
+      </div>
+    `);
+  });
+}
+function doTransfer() {
+  const body = {
+    to_location_id: parseInt(document.getElementById('tf-location').value),
+    remark: document.getElementById('tf-remark').value,
+    operator: document.getElementById('tf-operator').value || 'system'
+  };
+  if (!body.to_location_id) { alertMsg('请选择目标库位', 'error'); return; }
+  api(`/api/samples/${currentSampleId}/transfer`, { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('转移成功'); closeModal(); loadSamples(); loadDashboard(); if (currentSample) viewDetail(currentSampleId); }
+    else alertMsg(res.error, res.warning ? 'warning' : 'error');
+  });
+}
+
+function showOutboundModal() {
+  showModal(`
+    <h3>样本出库</h3>
+    <div class="form-group"><label>备注</label><textarea id="out-remark"></textarea></div>
+    <div class="form-group"><label>操作员</label><input id="out-operator"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-warning" onclick="doOutbound()">确认出库</button>
+    </div>
+  `);
+}
+function doOutbound() {
+  const body = {
+    remark: document.getElementById('out-remark').value,
+    operator: document.getElementById('out-operator').value || 'system'
+  };
+  api(`/api/samples/${currentSampleId}/outbound`, { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('出库成功'); closeModal(); loadSamples(); loadDashboard(); if (currentSample) viewDetail(currentSampleId); }
+    else alertMsg(res.error, 'error');
+  });
+}
+
+function showScrapModal() {
+  showModal(`
+    <h3>样本报废</h3>
+    <div class="form-group"><label>报废原因 *</label><textarea id="sc-remark" placeholder="请填写报废原因"></textarea></div>
+    <div class="form-group"><label>操作员</label><input id="sc-operator"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-danger" onclick="doScrap()">确认报废</button>
+    </div>
+  `);
+}
+function doScrap() {
+  const remark = document.getElementById('sc-remark').value.trim();
+  if (!remark) { alertMsg('请填写报废原因', 'error'); return; }
+  const body = {
+    remark,
+    operator: document.getElementById('sc-operator').value || 'system'
+  };
+  api(`/api/samples/${currentSampleId}/scrap`, { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('已报废'); closeModal(); loadSamples(); loadDashboard(); if (currentSample) viewDetail(currentSampleId); }
+    else alertMsg(res.error, 'error');
+  });
+}
+
+function showTempExceptionModal() {
+  showModal(`
+    <h3>温控异常记录</h3>
+    <div class="form-group"><label>异常温度值(℃) *</label><input id="te-temp" type="number" step="0.1" placeholder="例如: 12.5"></div>
+    <div class="form-group"><label>异常说明 *</label><textarea id="te-remark" placeholder="请描述异常情况"></textarea></div>
+    <div class="form-group"><label>操作员</label><input id="te-operator"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn" style="background:#6366f1;color:white;" onclick="doTempException()">记录异常</button>
+    </div>
+  `);
+}
+function doTempException() {
+  const temp = parseFloat(document.getElementById('te-temp').value);
+  const remark = document.getElementById('te-remark').value.trim();
+  if (isNaN(temp)) { alertMsg('请填写温度值', 'error'); return; }
+  if (!remark) { alertMsg('请填写异常说明', 'error'); return; }
+  const body = {
+    temperature: temp, remark,
+    operator: document.getElementById('te-operator').value || 'system'
+  };
+  api(`/api/samples/${currentSampleId}/temp-exception`, { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('已记录异常'); closeModal(); loadSamples(); loadDashboard(); if (currentSample) viewDetail(currentSampleId); }
+    else alertMsg(res.error, 'error');
+  });
+}
+
+function showBarcodeSearch() {
+  showModal(`
+    <h3>条码查询追踪</h3>
+    <div class="form-group"><label>条码 *</label><input id="bc-input" placeholder="输入条码"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="doBarcodeSearch()">查询</button>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('bc-input').focus(), 100);
+}
+function doBarcodeSearch() {
+  const bc = document.getElementById('bc-input').value.trim();
+  if (!bc) { alertMsg('请输入条码', 'error'); return; }
+  api('/api/samples/barcode/' + encodeURIComponent(bc)).then(res => {
+    if (res.success) {
+      currentSample = res.data;
+      currentSampleId = res.data.id;
+      closeModal();
+      renderDetail();
+      switchPage('detail');
+    } else alertMsg(res.error, 'error');
+  });
+}
+
+// ---------- 导入导出 ----------
+function exportCSV() {
+  window.location.href = '/api/samples/export/csv';
+}
+function showImportModal() {
+  showModal(`
+    <h3>批量导入样本</h3>
+    <div class="alert alert-warning" style="font-size:12px;">CSV格式: 条码,批次号,名称,要求温区<br>或使用表头: 条码,批次号,名称,要求温区</div>
+    <div class="form-group"><label>上传CSV文件</label><input type="file" id="import-file" accept=".csv" onchange="previewImport()"></div>
+    <div class="form-group"><label>预览 (可编辑)</label><textarea id="import-text" rows="10" placeholder="粘贴CSV内容或上传文件..."></textarea></div>
+    <div class="form-group"><label>操作员</label><input id="import-operator"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="doImport()">导入</button>
+    </div>
+  `);
+}
+function previewImport() {
+  const file = document.getElementById('import-file').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => document.getElementById('import-text').value = e.target.result;
+  reader.readAsText(file, 'UTF-8');
+}
+function doImport() {
+  const text = document.getElementById('import-text').value.trim();
+  if (!text) { alertMsg('请输入或上传CSV内容', 'error'); return; }
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  const rows = [];
+  let startIdx = 0;
+  const firstLine = lines[0];
+  if (firstLine.includes('条码') || firstLine.includes('barcode') || firstLine.includes('Barcode')) {
+    startIdx = 1;
+  }
+  for (let i = startIdx; i < lines.length; i++) {
+    const cols = lines[i].split(',').map(c => c.replace(/^"|"$/g, '').trim());
+    rows.push({ barcode: cols[0], batch_no: cols[1], name: cols[2] || '', required_zone: cols[3] || '' });
+  }
+  const body = { rows, operator: document.getElementById('import-operator').value || 'system' };
+  api('/api/samples/import/csv', { method: 'POST', body }).then(res => {
+    if (res.success) {
+      alertMsg(`导入完成: 成功${res.data.success}条，失败${res.data.failed}条${res.data.errors.length ? '，详见控制台' : ''}`);
+      if (res.data.errors.length) console.warn('导入失败明细:', res.data.errors);
+      closeModal(); loadSamples(); loadDashboard();
+    } else alertMsg(res.error, 'error');
+  });
+}
+
+// ---------- 配置 ----------
+function loadZones() {
+  api('/api/zones').then(res => {
+    if (!res.success) return;
+    document.querySelector('#zones-table tbody').innerHTML = res.data.map(z => `
+      <tr>
+        <td>${z.id}</td><td><strong>${z.name}</strong></td><td>${z.min_temp}</td><td>${z.max_temp}</td>
+        <td>${z.description || '-'}</td>
+        <td>
+          <button class="btn btn-sm btn-secondary" onclick="editZone(${z.id}, '${z.name.replace(/'/g,"\\'")}', ${z.min_temp}, ${z.max_temp}, '${(z.description||'').replace(/'/g,"\\'")}')">编辑</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteZone(${z.id})">删除</button>
+        </td>
+      </tr>
+    `).join('');
+  });
+}
+function showAddZoneModal() {
+  showModal(`
+    <h3>新增温区</h3>
+    <div class="form-group"><label>名称 *</label><input id="zone-name"></div>
+    <div class="form-row">
+      <div class="form-group"><label>最低温度(℃) *</label><input id="zone-min" type="number" step="0.1"></div>
+      <div class="form-group"><label>最高温度(℃) *</label><input id="zone-max" type="number" step="0.1"></div>
+    </div>
+    <div class="form-group"><label>描述</label><input id="zone-desc"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="addZone()">确认</button>
+    </div>
+  `);
+}
+function addZone() {
+  const body = {
+    name: document.getElementById('zone-name').value.trim(),
+    min_temp: parseFloat(document.getElementById('zone-min').value),
+    max_temp: parseFloat(document.getElementById('zone-max').value),
+    description: document.getElementById('zone-desc').value.trim()
+  };
+  api('/api/zones', { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('新增成功'); closeModal(); loadZones(); loadLocations(); }
+    else alertMsg(res.error, 'error');
+  });
+}
+function editZone(id, name, min, max, desc) {
+  showModal(`
+    <h3>编辑温区</h3>
+    <div class="form-group"><label>名称 *</label><input id="zone-name" value="${name}"></div>
+    <div class="form-row">
+      <div class="form-group"><label>最低温度(℃) *</label><input id="zone-min" type="number" step="0.1" value="${min}"></div>
+      <div class="form-group"><label>最高温度(℃) *</label><input id="zone-max" type="number" step="0.1" value="${max}"></div>
+    </div>
+    <div class="form-group"><label>描述</label><input id="zone-desc" value="${desc}"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="updateZone(${id})">保存</button>
+    </div>
+  `);
+}
+function updateZone(id) {
+  const body = {
+    name: document.getElementById('zone-name').value.trim(),
+    min_temp: parseFloat(document.getElementById('zone-min').value),
+    max_temp: parseFloat(document.getElementById('zone-max').value),
+    description: document.getElementById('zone-desc').value.trim()
+  };
+  api(`/api/zones/${id}`, { method: 'PUT', body }).then(res => {
+    if (res.success) { alertMsg('保存成功'); closeModal(); loadZones(); loadLocations(); }
+    else alertMsg(res.error, 'error');
+  });
+}
+function deleteZone(id) {
+  if (!confirm('确定删除该温区？')) return;
+  api(`/api/zones/${id}`, { method: 'DELETE' }).then(res => {
+    if (res.success) { alertMsg('已删除'); loadZones(); loadLocations(); }
+    else alertMsg(res.error, 'error');
+  });
+}
+
+function loadLocations() {
+  Promise.all([api('/api/locations'), api('/api/zones')]).then(([lres, zres]) => {
+    if (!lres.success || !zres.success) return;
+    const zones = zres.data;
+    document.querySelector('#locations-table tbody').innerHTML = lres.data.map(l => `
+      <tr>
+        <td><strong>${l.code}</strong></td><td>${l.name}</td><td>${l.zone_name}</td>
+        <td>${l.capacity}</td><td>${l.occupancy}</td>
+        <td>${l.description || '-'}</td>
+        <td>
+          <button class="btn btn-sm btn-secondary" onclick='editLocation(${JSON.stringify(l)})'>编辑</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteLocation(${l.id})">删除</button>
+        </td>
+      </tr>
+    `).join('');
+    window._zones = zones;
+  });
+}
+function showAddLocationModal() {
+  api('/api/zones').then(res => {
+    const zones = res.data || [];
+    showModal(`
+      <h3>新增库位</h3>
+      <div class="form-group"><label>库位编码 *</label><input id="loc-code" placeholder="例如 R-A1"></div>
+      <div class="form-group"><label>库位名称 *</label><input id="loc-name"></div>
+      <div class="form-row">
+        <div class="form-group"><label>所属温区 *</label>
+          <select id="loc-zone">${zones.map(z=>`<option value="${z.id}">${z.name}</option>`).join('')}</select>
+        </div>
+        <div class="form-group"><label>容量 *</label><input id="loc-cap" type="number" value="10"></div>
+      </div>
+      <div class="form-group"><label>描述</label><input id="loc-desc"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="addLocation()">确认</button>
+      </div>
+    `);
+  });
+}
+function addLocation() {
+  const body = {
+    code: document.getElementById('loc-code').value.trim(),
+    name: document.getElementById('loc-name').value.trim(),
+    zone_id: parseInt(document.getElementById('loc-zone').value),
+    capacity: parseInt(document.getElementById('loc-cap').value),
+    description: document.getElementById('loc-desc').value.trim()
+  };
+  api('/api/locations', { method: 'POST', body }).then(res => {
+    if (res.success) { alertMsg('新增成功'); closeModal(); loadLocations(); }
+    else alertMsg(res.error, 'error');
+  });
+}
+function editLocation(l) {
+  const zones = window._zones || [];
+  showModal(`
+    <h3>编辑库位</h3>
+    <div class="form-group"><label>库位编码 *</label><input id="loc-code" value="${l.code}"></div>
+    <div class="form-group"><label>库位名称 *</label><input id="loc-name" value="${l.name}"></div>
+    <div class="form-row">
+      <div class="form-group"><label>所属温区 *</label>
+        <select id="loc-zone">${zones.map(z=>`<option value="${z.id}" ${z.id===l.zone_id?'selected':''}>${z.name}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label>容量 *</label><input id="loc-cap" type="number" value="${l.capacity}"></div>
+    </div>
+    <div class="form-group"><label>描述</label><input id="loc-desc" value="${l.description||''}"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="updateLocation(${l.id})">保存</button>
+    </div>
+  `);
+}
+function updateLocation(id) {
+  const body = {
+    code: document.getElementById('loc-code').value.trim(),
+    name: document.getElementById('loc-name').value.trim(),
+    zone_id: parseInt(document.getElementById('loc-zone').value),
+    capacity: parseInt(document.getElementById('loc-cap').value),
+    description: document.getElementById('loc-desc').value.trim()
+  };
+  api(`/api/locations/${id}`, { method: 'PUT', body }).then(res => {
+    if (res.success) { alertMsg('保存成功'); closeModal(); loadLocations(); }
+    else alertMsg(res.error, 'error');
+  });
+}
+function deleteLocation(id) {
+  if (!confirm('确定删除该库位？')) return;
+  api(`/api/locations/${id}`, { method: 'DELETE' }).then(res => {
+    if (res.success) { alertMsg('已删除'); loadLocations(); }
+    else alertMsg(res.error, 'error');
+  });
+}
+
+document.getElementById('modal-backdrop').addEventListener('click', e => {
+  if (e.target.id === 'modal-backdrop') closeModal();
+});
+
+loadDashboard();
+</script>
+</body>
+</html>
