@@ -110,16 +110,58 @@ tr:hover { background: #f9fafb; }
 
 .action-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .location-tag { display: inline-block; padding: 2px 8px; background: #eff6ff; color: #1d4ed8; border-radius: 4px; font-size: 12px; font-weight: 500; }
+
+.user-info { display: flex; align-items: center; gap: 12px; margin-left: 16px; }
+.user-info .user-name { font-size: 14px; opacity: 0.9; }
+.user-info .user-role { font-size: 11px; background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 4px; }
+
+.badge-matched { background: #d1fae5; color: #065f46; }
+.badge-mismatch { background: #fee2e2; color: #991b1b; }
+.badge-pending { background: #fef3c7; color: #92400e; }
+.badge-processing { background: #dbeafe; color: #1e40af; }
+.badge-resolved { background: #d1fae5; color: #065f46; }
+.badge-ignored { background: #e5e7eb; color: #6b7280; }
+.badge-completed { background: #d1fae5; color: #065f46; }
+.badge-draft { background: #e5e7eb; color: #6b7280; }
+.badge-cancelled { background: #fee2e2; color: #991b1b; }
+
+.tab-bar { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid #e5e7eb; }
+.tab-btn { background: none; border: none; padding: 10px 20px; cursor: pointer; font-size: 14px; color: #6b7280; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
+
+.inventory-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.summary-item { padding: 12px; background: #f9fafb; border-radius: 8px; text-align: center; }
+.summary-item .num { font-size: 24px; font-weight: 700; color: #111827; }
+.summary-item .label { font-size: 12px; color: #6b7280; margin-top: 4px; }
+.summary-item.matched .num { color: #059669; }
+.summary-item.extra .num { color: #dc2626; }
+.summary-item.missing .num { color: #f59e0b; }
+.summary-item.mislocated .num { color: #d97706; }
+.summary-item.outbound .num { color: #7c3aed; }
+
+.timeline-item.reverse_transfer::before { background: #8b5cf6; }
+.timeline-item.reverse_scrapped::before { background: #8b5cf6; }
+.timeline-item.inventory_correction::before { background: #0ea5e9; }
+
+.reversal-note { font-size: 12px; color: #7c3aed; margin-top: 4px; font-style: italic; }
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>❄️ 冷链样本入库出库追踪系统</h1>
-  <div class="nav">
-    <button class="nav-btn active" onclick="switchPage('dashboard')">台账概览</button>
-    <button class="nav-btn" onclick="switchPage('samples')">样本管理</button>
-    <button class="nav-btn" onclick="switchPage('config')">库位配置</button>
+  <div style="display:flex;align-items:center;">
+    <div class="nav">
+      <button class="nav-btn active" onclick="switchPage('dashboard')">台账概览</button>
+      <button class="nav-btn" onclick="switchPage('samples')">样本管理</button>
+      <button class="nav-btn" onclick="switchPage('inventory')">盘点管理</button>
+      <button class="nav-btn" onclick="switchPage('history')">历史查询</button>
+      <button class="nav-btn" onclick="switchPage('config')">库位配置</button>
+    </div>
+    <div class="user-info" id="user-info">
+      <span class="user-name" id="user-name">未登录</span>
+      <button class="nav-btn" onclick="showLoginModal()" id="login-btn">登录</button>
+    </div>
   </div>
 </div>
 
@@ -228,6 +270,78 @@ tr:hover { background: #f9fafb; }
     </div>
   </div>
 
+  <div id="page-inventory" class="page">
+    <div class="card">
+      <div class="card-title">
+        <span>📋 盘点单列表</span>
+        <button class="btn btn-primary btn-sm" onclick="showAddInventoryModal()">➕ 新建盘点</button>
+      </div>
+      <div class="search-bar">
+        <input type="text" id="inv-search" placeholder="搜索盘点单号/标题..." oninput="loadInventory()">
+        <select id="inv-status" onchange="loadInventory()">
+          <option value="all">全部状态</option>
+          <option value="draft">草稿</option>
+          <option value="processing">处理中</option>
+          <option value="completed">已完成</option>
+          <option value="cancelled">已取消</option>
+        </select>
+      </div>
+      <table id="inventory-table">
+        <thead><tr><th>盘点单号</th><th>标题</th><th>类型</th><th>盘点范围</th><th>状态</th><th>期望/扫描</th><th>匹配/差异</th><th>创建人</th><th>创建时间</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="page-inventory-detail" class="page">
+    <div class="card">
+      <div class="detail-header">
+        <div>
+          <h2 id="inv-detail-no" style="margin-bottom:8px;">盘点单号</h2>
+          <div id="inv-detail-title" style="color:#6b7280;">标题</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" onclick="switchPage('inventory')">← 返回列表</button>
+          <button class="btn btn-success btn-sm" id="btn-inv-import" onclick="showImportScanModal()">📥 导入扫码</button>
+          <button class="btn btn-primary btn-sm" id="btn-inv-export" onclick="exportInventoryCSV()">📤 导出结果</button>
+          <button class="btn btn-warning btn-sm" id="btn-inv-complete" onclick="completeInventory()">✅ 完成盘点</button>
+        </div>
+      </div>
+      <div class="inventory-summary" id="inv-summary"></div>
+      <div class="tab-bar">
+        <button class="tab-btn active" onclick="switchInvTab('items')">扫码明细</button>
+        <button class="tab-btn" onclick="switchInvTab('discrepancies')">差异处理</button>
+      </div>
+      <div id="inv-tab-items">
+        <table id="inv-items-table">
+          <thead><tr><th>条码</th><th>批次号</th><th>名称</th><th>扫码库位</th><th>台账库位</th><th>匹配状态</th><th>差异类型</th><th>差异说明</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="inv-tab-discrepancies" style="display:none;">
+        <table id="inv-disp-table">
+          <thead><tr><th>条码</th><th>类型</th><th>描述</th><th>原位置</th><th>新位置</th><th>状态</th><th>处理人</th><th>处理时间</th><th>处理说明</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="page-history" class="page">
+    <div class="card">
+      <div class="card-title">
+        <span>🔍 历史追踪查询</span>
+      </div>
+      <div class="search-bar">
+        <input type="text" id="hist-barcode" placeholder="按条码查询...">
+        <input type="text" id="hist-batch" placeholder="按批次查询...">
+        <input type="text" id="hist-order" placeholder="按盘点单号查询...">
+        <button class="btn btn-primary btn-sm" onclick="searchHistory()">查询</button>
+      </div>
+      <div id="history-results"></div>
+    </div>
+  </div>
+
 </div>
 
 <div class="modal-backdrop" id="modal-backdrop">
@@ -237,13 +351,26 @@ tr:hover { background: #f9fafb; }
 <script>
 let currentSample = null;
 let currentSampleId = null;
+let currentUser = null;
+let currentInventory = null;
+let currentInventoryId = null;
+let currentInvTab = 'items';
 
 function api(path, options = {}) {
   return fetch(path, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
     body: options.body ? JSON.stringify(options.body) : undefined
-  }).then(r => r.json());
+  }).then(r => r.json()).then(res => {
+    if (res.needLogin) {
+      alertMsg('请先登录', 'warning');
+      showLoginModal();
+    }
+    if (res.forbidden) {
+      alertMsg('权限不足，需要管理员角色', 'error');
+    }
+    return res;
+  });
 }
 
 function switchPage(name) {
@@ -251,13 +378,28 @@ function switchPage(name) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   const pageId = name === 'detail' ? 'page-detail' : 'page-' + name;
   document.getElementById(pageId).classList.add('active');
-  const btnMap = { dashboard: 0, samples: 1, config: 2 };
+  const btnMap = { dashboard: 0, samples: 1, inventory: 2, history: 3, config: 4 };
   if (btnMap[name] !== undefined) {
     document.querySelectorAll('.nav-btn')[btnMap[name]].classList.add('active');
   }
   if (name === 'dashboard') loadDashboard();
   if (name === 'samples') loadSamples();
+  if (name === 'inventory') loadInventory();
   if (name === 'config') { loadZones(); loadLocations(); }
+}
+
+function updateUserUI() {
+  const userNameEl = document.getElementById('user-name');
+  const loginBtn = document.getElementById('login-btn');
+  if (currentUser) {
+    userNameEl.innerHTML = `${currentUser.real_name || currentUser.username} <span class="user-role">${currentUser.role_label}</span>`;
+    loginBtn.textContent = '退出登录';
+    loginBtn.onclick = doLogout;
+  } else {
+    userNameEl.textContent = '未登录';
+    loginBtn.textContent = '登录';
+    loginBtn.onclick = showLoginModal;
+  }
 }
 
 function closeModal() {
@@ -857,8 +999,576 @@ function deleteLocation(id) {
   });
 }
 
+// ---------- 用户登录 ----------
+function showLoginModal() {
+  if (currentUser) {
+    doLogout();
+    return;
+  }
+  showModal(`
+    <h3>用户登录</h3>
+    <div class="alert alert-warning" style="font-size:12px;">
+      预置账号：<br>
+      管理员: admin / admin123<br>
+      库管员: warehouse / wh123
+    </div>
+    <div class="form-group"><label>用户名 *</label><input id="login-username" placeholder="用户名"></div>
+    <div class="form-group"><label>密码 *</label><input id="login-password" type="password" placeholder="密码"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="doLogin()">登录</button>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('login-username').focus(), 100);
+}
+function doLogin() {
+  const body = {
+    username: document.getElementById('login-username').value.trim(),
+    password: document.getElementById('login-password').value
+  };
+  if (!body.username || !body.password) { alertMsg('请输入用户名和密码', 'error'); return; }
+  api('/api/auth/login', { method: 'POST', body }).then(res => {
+    if (res.success) {
+      currentUser = res.data;
+      updateUserUI();
+      closeModal();
+      alertMsg('登录成功');
+    } else alertMsg(res.error, 'error');
+  });
+}
+function doLogout() {
+  api('/api/auth/logout', { method: 'POST' }).then(res => {
+    if (res.success) {
+      currentUser = null;
+      updateUserUI();
+      alertMsg('已退出登录');
+    }
+  });
+}
+
+// ---------- 盘点管理 ----------
+function loadInventory() {
+  const kw = document.getElementById('inv-search').value;
+  const st = document.getElementById('inv-status').value;
+  const url = '/api/inventory' + (kw || st !== 'all' ? '?' + new URLSearchParams({ keyword: kw, status: st }).toString() : '');
+  api(url).then(res => {
+    if (!res.success) return;
+    const tbody = document.querySelector('#inventory-table tbody');
+    if (res.data.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无盘点单</td></tr>';
+      return;
+    }
+    tbody.innerHTML = res.data.map(o => {
+      const typeLabel = o.type === 'zone' ? '按温区' : '按库位';
+      const scopeLabel = o.type === 'zone' ? (o.zone_name || '-') : (o.location_code || '-');
+      const statusClass = 'badge-' + o.status;
+      const diffCount = (o.total_extra || 0) + (o.total_missing || 0) + (o.total_mislocated || 0) + (o.total_outbound_scanned || 0);
+      return `<tr>
+        <td><strong>${o.order_no}</strong></td>
+        <td>${o.title}</td>
+        <td>${typeLabel}</td>
+        <td>${scopeLabel}</td>
+        <td><span class="badge ${statusClass}">${o.status_label}</span></td>
+        <td>${o.total_expected || 0} / ${o.total_scanned || 0}</td>
+        <td>${o.total_matched || 0} / <span class="badge badge-danger">${diffCount}</span></td>
+        <td>${o.operator || '-'}</td>
+        <td>${o.created_at}</td>
+        <td>
+          <button class="btn btn-sm btn-primary" onclick="viewInventoryDetail(${o.id})">详情</button>
+        </td>
+      </tr>`;
+    }).join('');
+  });
+}
+function showAddInventoryModal() {
+  if (!currentUser) { showLoginModal(); return; }
+  Promise.all([api('/api/zones'), api('/api/locations')]).then(([zres, lres]) => {
+    if (!zres.success || !lres.success) return;
+    const zones = zres.data;
+    const locations = lres.data;
+    showModal(`
+      <h3>新建盘点单</h3>
+      <div class="form-group"><label>盘点标题 *</label><input id="inv-title" placeholder="例如：2024年6月冷藏区盘点"></div>
+      <div class="form-group"><label>盘点类型 *</label>
+        <select id="inv-type" onchange="toggleInvScope()">
+          <option value="zone">按温区盘点</option>
+          <option value="location">按库位盘点</option>
+        </select>
+      </div>
+      <div class="form-group" id="inv-zone-group"><label>选择温区 *</label>
+        <select id="inv-zone">${zones.map(z => `<option value="${z.id}">${z.name}</option>`).join('')}</select>
+      </div>
+      <div class="form-group" id="inv-loc-group" style="display:none;"><label>选择库位 *</label>
+        <select id="inv-location">${locations.map(l => `<option value="${l.id}">${l.code} - ${l.name}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label>备注</label><textarea id="inv-remark"></textarea></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="addInventory()">创建盘点单</button>
+      </div>
+    `);
+  });
+}
+function toggleInvScope() {
+  const type = document.getElementById('inv-type').value;
+  document.getElementById('inv-zone-group').style.display = type === 'zone' ? '' : 'none';
+  document.getElementById('inv-loc-group').style.display = type === 'location' ? '' : 'none';
+}
+function addInventory() {
+  const type = document.getElementById('inv-type').value;
+  const body = {
+    title: document.getElementById('inv-title').value.trim(),
+    type,
+    zone_id: type === 'zone' ? parseInt(document.getElementById('inv-zone').value) : null,
+    location_id: type === 'location' ? parseInt(document.getElementById('inv-location').value) : null,
+    remark: document.getElementById('inv-remark').value.trim()
+  };
+  if (!body.title) { alertMsg('请填写盘点标题', 'error'); return; }
+  api('/api/inventory', { method: 'POST', body }).then(res => {
+    if (res.success) {
+      alertMsg('盘点单创建成功');
+      closeModal();
+      loadInventory();
+      viewInventoryDetail(res.data.id);
+    } else alertMsg(res.error, 'error');
+  });
+}
+function viewInventoryDetail(id) {
+  if (!currentUser) { showLoginModal(); return; }
+  api('/api/inventory/' + id).then(res => {
+    if (!res.success) { alertMsg(res.error, 'error'); return; }
+    currentInventory = res.data;
+    currentInventoryId = id;
+    renderInventoryDetail();
+    switchPage('inventory-detail');
+  });
+}
+function renderInventoryDetail() {
+  const d = currentInventory;
+  const o = d.order;
+  document.getElementById('inv-detail-no').textContent = o.order_no;
+  document.getElementById('inv-detail-title').textContent = o.title;
+
+  document.getElementById('btn-inv-import').style.display = o.status === 'completed' ? 'none' : '';
+  document.getElementById('btn-inv-complete').style.display = o.status === 'completed' ? 'none' : '';
+
+  const summaryHtml = `
+    <div class="summary-item"><div class="num">${o.total_expected || 0}</div><div class="label">台账数量</div></div>
+    <div class="summary-item"><div class="num">${o.total_scanned || 0}</div><div class="label">扫描数量</div></div>
+    <div class="summary-item matched"><div class="num">${o.total_matched || 0}</div><div class="label">匹配</div></div>
+    <div class="summary-item extra"><div class="num">${o.total_extra || 0}</div><div class="label">多扫</div></div>
+    <div class="summary-item missing"><div class="num">${o.total_missing || 0}</div><div class="label">漏扫</div></div>
+    <div class="summary-item mislocated"><div class="num">${o.total_mislocated || 0}</div><div class="label">库位不一致</div></div>
+    <div class="summary-item outbound"><div class="num">${o.total_outbound_scanned || 0}</div><div class="label">已出库被扫</div></div>
+  `;
+  document.getElementById('inv-summary').innerHTML = summaryHtml;
+
+  const itemsBody = document.querySelector('#inv-items-table tbody');
+  if (d.items.length === 0) {
+    itemsBody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无扫码数据，请先导入扫码CSV</td></tr>';
+  } else {
+    itemsBody.innerHTML = d.items.map(i => {
+      const matchClass = i.match_status === 'matched' ? 'badge-matched' :
+                         i.match_status === 'mismatch' ? 'badge-mismatch' : 'badge-pending';
+      const dispClass = i.discrepancy_type ? 'badge-' + i.discrepancy_type.replace('_', '-') : '';
+      return `<tr>
+        <td><strong>${i.barcode}</strong></td>
+        <td>${i.batch_no || '-'}</td>
+        <td>${i.name || '-'}</td>
+        <td>${i.scanned_location_code || '-'}</td>
+        <td>${i.expected_location_code || '-'}</td>
+        <td><span class="badge ${matchClass}">${i.status_label}</span></td>
+        <td>${i.discrepancy_type ? `<span class="badge ${dispClass}">${i.discrepancy_type_label}</span>` : '-'}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${i.discrepancy_note || '-'}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  const dispBody = document.querySelector('#inv-disp-table tbody');
+  if (d.discrepancies.length === 0) {
+    dispBody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无差异记录</td></tr>';
+  } else {
+    dispBody.innerHTML = d.discrepancies.map(disp => {
+      const typeClass = 'badge-' + disp.type.replace('_', '-');
+      const statusClass = 'badge-' + disp.status;
+      const canResolve = currentUser && currentUser.role === 'admin' && disp.status !== 'resolved';
+      return `<tr>
+        <td><strong>${disp.barcode}</strong></td>
+        <td><span class="badge ${typeClass}">${disp.type_label}</span></td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">${disp.description}</td>
+        <td>${disp.old_location_code || '-'}</td>
+        <td>${disp.new_location_code || '-'}</td>
+        <td><span class="badge ${statusClass}">${disp.status_label}</span></td>
+        <td>${disp.handler || '-'}</td>
+        <td>${disp.handled_at || '-'}</td>
+        <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;">${disp.handler_remark || '-'}</td>
+        <td>
+          <button class="btn btn-sm btn-secondary" onclick="addDispNote(${disp.id})">备注</button>
+          ${canResolve ? `<button class="btn btn-sm btn-primary" onclick="showResolveModal(${disp.id})">处理</button>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+  }
+}
+function switchInvTab(tab) {
+  currentInvTab = tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('inv-tab-items').style.display = tab === 'items' ? '' : 'none';
+  document.getElementById('inv-tab-discrepancies').style.display = tab === 'discrepancies' ? '' : 'none';
+}
+function showImportScanModal() {
+  showModal(`
+    <h3>导入扫码数据</h3>
+    <div class="alert alert-warning" style="font-size:12px;">CSV格式: 条码,库位,扫描时间<br>或使用表头: 条码,库位,扫描时间</div>
+    <div class="form-group"><label>上传CSV文件</label><input type="file" id="scan-file" accept=".csv" onchange="previewScanImport()"></div>
+    <div class="form-group"><label>预览 (可编辑)</label><textarea id="scan-text" rows="12" placeholder="粘贴CSV内容或上传文件..."></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="doImportScan()">导入并比对</button>
+    </div>
+  `);
+}
+function previewScanImport() {
+  const file = document.getElementById('scan-file').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => document.getElementById('scan-text').value = e.target.result;
+  reader.readAsText(file, 'UTF-8');
+}
+function doImportScan() {
+  const csv_text = document.getElementById('scan-text').value.trim();
+  if (!csv_text) { alertMsg('请输入或上传CSV内容', 'error'); return; }
+  api(`/api/inventory/${currentInventoryId}/import`, { method: 'POST', body: { csv_text } }).then(res => {
+    if (res.success) {
+      alertMsg(`导入成功: ${res.data.imported}条${res.data.duplicates ? '，重复' + res.data.duplicates + '条已跳过' : ''}`);
+      closeModal();
+      viewInventoryDetail(currentInventoryId);
+    } else alertMsg(res.error, 'error');
+  });
+}
+function exportInventoryCSV() {
+  window.location.href = `/api/inventory/${currentInventoryId}/export/csv`;
+}
+function completeInventory() {
+  if (!confirm('确定完成该盘点单？完成后不能再导入扫码数据。')) return;
+  api(`/api/inventory/${currentInventoryId}/complete`, { method: 'POST' }).then(res => {
+    if (res.success) {
+      alertMsg('盘点单已完成');
+      viewInventoryDetail(currentInventoryId);
+    } else alertMsg(res.error, 'error');
+  });
+}
+function addDispNote(id) {
+  if (!currentUser) { showLoginModal(); return; }
+  showModal(`
+    <h3>添加差异说明</h3>
+    <div class="form-group"><label>说明内容 *</label><textarea id="disp-note" rows="4" placeholder="请输入差异说明..."></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="doAddDispNote(${id})">提交</button>
+    </div>
+  `);
+}
+function doAddDispNote(id) {
+  const remark = document.getElementById('disp-note').value.trim();
+  if (!remark) { alertMsg('请输入说明内容', 'error'); return; }
+  api(`/api/discrepancies/${id}/note`, { method: 'POST', body: { remark } }).then(res => {
+    if (res.success) {
+      alertMsg('说明已提交');
+      closeModal();
+      viewInventoryDetail(currentInventoryId);
+    } else alertMsg(res.error, 'error');
+  });
+}
+function showResolveModal(id) {
+  const disp = currentInventory.discrepancies.find(d => d.id === id);
+  if (!disp) return;
+
+  let actionsHtml = '';
+  if (disp.type === 'mislocated' && disp.sample_id) {
+    actionsHtml = `
+      <div class="form-group"><label>处理方式 *</label>
+        <select id="resolve-action" onchange="toggleResolveFields()">
+          <option value="correct_location">修正库位到扫码位置</option>
+          <option value="ignore">忽略此差异</option>
+        </select>
+      </div>
+      <div class="form-group" id="resolve-loc-group"><label>确认新库位</label>
+        <input id="resolve-new-loc" value="${disp.new_location_code || ''}" readonly>
+      </div>
+      <div class="form-group"><label>处理原因 *</label><textarea id="resolve-remark" rows="3" placeholder="请填写处理原因..."></textarea></div>
+    `;
+  } else if (disp.type === 'extra') {
+    actionsHtml = `
+      <div class="form-group"><label>处理方式 *</label>
+        <select id="resolve-action" onchange="toggleResolveFields()">
+          <option value="register_extra">补登此样本</option>
+          <option value="ignore">忽略此差异</option>
+        </select>
+      </div>
+      <div id="resolve-extra-group">
+        <div class="form-group"><label>批次号 *</label><input id="resolve-batch" placeholder="批次号"></div>
+        <div class="form-group"><label>样本名称</label><input id="resolve-name" placeholder="样本名称"></div>
+      </div>
+      <div class="form-group"><label>处理原因 *</label><textarea id="resolve-remark" rows="3" placeholder="请填写处理原因..."></textarea></div>
+    `;
+  } else {
+    actionsHtml = `
+      <div class="form-group"><label>处理方式 *</label>
+        <select id="resolve-action">
+          <option value="ignore">忽略此差异</option>
+        </select>
+      </div>
+      <div class="form-group"><label>处理原因 *</label><textarea id="resolve-remark" rows="3" placeholder="请填写处理原因..."></textarea></div>
+    `;
+  }
+
+  showModal(`
+    <h3>处理差异 #${id}</h3>
+    <div class="alert alert-info" style="font-size:12px;">
+      <strong>条码:</strong> ${disp.barcode}<br>
+      <strong>类型:</strong> ${disp.type_label}<br>
+      <strong>描述:</strong> ${disp.description}
+    </div>
+    ${actionsHtml}
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="doResolve(${id})">确认处理</button>
+    </div>
+  `);
+}
+function toggleResolveFields() {
+  const action = document.getElementById('resolve-action').value;
+  if (action === 'ignore') {
+    const locGroup = document.getElementById('resolve-loc-group');
+    if (locGroup) locGroup.style.display = 'none';
+    const extraGroup = document.getElementById('resolve-extra-group');
+    if (extraGroup) extraGroup.style.display = 'none';
+  } else {
+    const locGroup = document.getElementById('resolve-loc-group');
+    if (locGroup) locGroup.style.display = '';
+    const extraGroup = document.getElementById('resolve-extra-group');
+    if (extraGroup) extraGroup.style.display = '';
+  }
+}
+function doResolve(id) {
+  const action = document.getElementById('resolve-action').value;
+  const remark = document.getElementById('resolve-remark').value.trim();
+  if (!remark) { alertMsg('请填写处理原因', 'error'); return; }
+
+  const body = { action, remark };
+  if (action === 'register_extra') {
+    body.batch_no = document.getElementById('resolve-batch').value.trim();
+    body.name = document.getElementById('resolve-name').value.trim();
+    if (!body.batch_no) { alertMsg('请填写批次号', 'error'); return; }
+  }
+
+  const disp = currentInventory.discrepancies.find(d => d.id === id);
+  if (action === 'correct_location' && disp) {
+    body.new_location_id = disp.new_location_id;
+  }
+
+  api(`/api/discrepancies/${id}/resolve`, { method: 'POST', body }).then(res => {
+    if (res.success) {
+      alertMsg('处理成功');
+      closeModal();
+      viewInventoryDetail(currentInventoryId);
+    } else alertMsg(res.error, 'error');
+  });
+}
+
+// ---------- 历史查询 ----------
+function searchHistory() {
+  if (!currentUser) { showLoginModal(); return; }
+  const barcode = document.getElementById('hist-barcode').value.trim();
+  const batch_no = document.getElementById('hist-batch').value.trim();
+  const order = document.getElementById('hist-order').value.trim();
+
+  if (!barcode && !batch_no && !order) {
+    alertMsg('请至少输入一个查询条件', 'warning');
+    return;
+  }
+
+  const params = {};
+  if (barcode) params.barcode = barcode;
+  if (batch_no) params.batch_no = batch_no;
+  if (order) params.inventory_order_id = order;
+
+  const url = '/api/history/search?' + new URLSearchParams(params).toString();
+  api(url).then(res => {
+    if (!res.success) return;
+    const container = document.getElementById('history-results');
+    const d = res.data;
+
+    let html = '';
+    if (d.samples && d.samples.length > 0) {
+      html += '<h4 style="margin:20px 0 12px;">📦 样本追踪记录</h4>';
+      d.samples.forEach(s => {
+        html += `
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">
+              <span>条码: <strong>${s.barcode}</strong> | 批次: ${s.batch_no} | 名称: ${s.name || '-'} | 状态: <span class="badge badge-${s.status.replace('_','-')}">${s.status_label}</span></span>
+            </div>
+            <div class="detail-info" style="margin-bottom:16px;">
+              <div class="detail-info-item"><div class="label">当前位置</div><div class="value">${s.location_code || '-'}</div></div>
+              <div class="detail-info-item"><div class="label">当前温区</div><div class="value">${s.zone_name || '-'}</div></div>
+            </div>
+            <h5 style="margin-bottom:12px;">操作时间线</h5>
+            <div class="timeline">
+              ${s.timeline.map(t => `
+                <div class="timeline-item ${t.action_type}">
+                  <div class="timeline-time">${t.created_at}${t.operator ? ' · ' + t.operator : ''}</div>
+                  <div class="timeline-content">
+                    <span class="action">${t.action_label}</span>
+                    ${t.from_code ? ` ${t.from_code} →` : ''}${t.to_code ? ` ${t.to_code}` : ''}
+                    ${t.remark ? `<div class="remark">备注: ${t.remark}</div>` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+            ${s.discrepancies && s.discrepancies.length > 0 ? `
+              <h5 style="margin:20px 0 12px;">盘点差异记录</h5>
+              <table>
+                <thead><tr><th>盘点单号</th><th>类型</th><th>描述</th><th>状态</th><th>处理人</th><th>处理时间</th></tr></thead>
+                <tbody>
+                  ${s.discrepancies.map(disp => `
+                    <tr>
+                      <td>${disp.order_no}</td>
+                      <td><span class="badge badge-${disp.type.replace('_','-')}">${disp.type_label}</span></td>
+                      <td>${disp.description}</td>
+                      <td><span class="badge badge-${disp.status}">${disp.status_label}</span></td>
+                      <td>${disp.handler || '-'}</td>
+                      <td>${disp.handled_at || '-'}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            ` : ''}
+            ${s.reversals && s.reversals.length > 0 ? `
+              <h5 style="margin:20px 0 12px;">撤销操作记录</h5>
+              <table>
+                <thead><tr><th>原操作</th><th>原时间</th><th>撤销人</th><th>撤销原因</th><th>撤销时间</th></tr></thead>
+                <tbody>
+                  ${s.reversals.map(r => `
+                    <tr>
+                      <td>${r.original_action}</td>
+                      <td>${r.original_time}</td>
+                      <td>${r.reversed_by}</td>
+                      <td>${r.reason}</td>
+                      <td>${r.reversal_time}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            ` : ''}
+          </div>
+        `;
+      });
+    }
+    if (d.inventory_orders && d.inventory_orders.length > 0) {
+      html += '<h4 style="margin:20px 0 12px;">📋 盘点单记录</h4>';
+      d.inventory_orders.forEach(o => {
+        html += `
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-title">
+              <span>${o.order_no} - ${o.title}</span>
+              <button class="btn btn-sm btn-primary" onclick="viewInventoryDetail(${o.id})">查看详情</button>
+            </div>
+            <div class="detail-info">
+              <div class="detail-info-item"><div class="label">类型</div><div class="value">${o.type === 'zone' ? '按温区' : '按库位'}</div></div>
+              <div class="detail-info-item"><div class="label">范围</div><div class="value">${o.zone_name || o.location_code || '-'}</div></div>
+              <div class="detail-info-item"><div class="label">状态</div><div class="value"><span class="badge badge-${o.status}">${o.status_label}</span></div></div>
+              <div class="detail-info-item"><div class="label">创建人</div><div class="value">${o.operator || '-'}</div></div>
+              <div class="detail-info-item"><div class="label">创建时间</div><div class="value">${o.created_at}</div></div>
+            </div>
+          </div>
+        `;
+      });
+    }
+    if (!html) {
+      html = '<div class="empty-state">未找到相关记录</div>';
+    }
+    container.innerHTML = html;
+  });
+}
+
+// ---------- 撤销操作 ----------
+function showReverseActionModal() {
+  if (!currentUser || currentUser.role !== 'admin') {
+    alertMsg('需要管理员权限', 'error');
+    return;
+  }
+  api(`/api/samples/${currentSampleId}/reversable-actions`).then(res => {
+    if (!res.success) return;
+    if (res.data.length === 0) {
+      alertMsg('没有可撤销的操作', 'warning');
+      return;
+    }
+    const actions = res.data;
+    showModal(`
+      <h3>撤销操作</h3>
+      <div class="alert alert-warning" style="font-size:12px;">撤销不会抹掉原记录，会追加一条反向记录</div>
+      <div class="form-group"><label>选择要撤销的操作 *</label>
+        <select id="reverse-timeline">
+          ${actions.map(a => `
+            <option value="${a.id}">${a.action_label} - ${a.from_code ? a.from_code + ' → ' + a.to_code : a.action_label} (${a.created_at})</option>
+          `).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>撤销原因 *</label><textarea id="reverse-reason" rows="3" placeholder="请填写撤销原因..."></textarea></div>
+      <div class="form-group"><label>备注</label><textarea id="reverse-remark" rows="2"></textarea></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-danger" onclick="doReverseAction()">确认撤销</button>
+      </div>
+    `);
+  });
+}
+function doReverseAction() {
+  const timelineId = parseInt(document.getElementById('reverse-timeline').value);
+  const reason = document.getElementById('reverse-reason').value.trim();
+  const remark = document.getElementById('reverse-remark').value.trim();
+  if (!reason) { alertMsg('请填写撤销原因', 'error'); return; }
+  if (!confirm('确定要撤销此操作吗？撤销会追加反向记录，原记录保留。')) return;
+
+  api(`/api/samples/${currentSampleId}/reverse/${timelineId}`, { method: 'POST', body: { reason, remark } }).then(res => {
+    if (res.success) {
+      alertMsg('撤销成功');
+      closeModal();
+      viewDetail(currentSampleId);
+    } else alertMsg(res.error, 'error');
+  });
+}
+
+// 在详情页的操作按钮区域添加撤销按钮
+const originalRenderDetail = renderDetail;
+renderDetail = function() {
+  originalRenderDetail();
+  if (currentUser && currentUser.role === 'admin' && currentSample) {
+    const btnGroup = document.querySelector('#page-detail .detail-header div:last-child');
+    if (btnGroup && !document.getElementById('btn-reverse')) {
+      const reverseBtn = document.createElement('button');
+      reverseBtn.id = 'btn-reverse';
+      reverseBtn.className = 'btn btn-sm';
+      reverseBtn.style.cssText = 'background:#8b5cf6;color:white;';
+      reverseBtn.textContent = '↩️ 撤销操作';
+      reverseBtn.onclick = showReverseActionModal;
+      btnGroup.insertBefore(reverseBtn, btnGroup.firstChild);
+    }
+  }
+};
+
 document.getElementById('modal-backdrop').addEventListener('click', e => {
   if (e.target.id === 'modal-backdrop') closeModal();
+});
+
+// 检查登录状态
+api('/api/auth/current').then(res => {
+  if (res.success && res.data) {
+    currentUser = res.data;
+    updateUserUI();
+  }
 });
 
 loadDashboard();

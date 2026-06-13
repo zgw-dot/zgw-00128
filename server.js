@@ -2,7 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
-const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx } = require('./db');
+const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,8 +25,40 @@ const ACTION_LABELS = {
   transfer: '转移',
   outbound: '出库',
   scrapped: '报废',
-  temp_exception: '温控异常'
+  temp_exception: '温控异常',
+  reverse_transfer: '撤销转移',
+  reverse_scrapped: '撤销报废',
+  inventory_correction: '盘点纠错'
 };
+
+const INVENTORY_STATUS_LABELS = {
+  draft: '草稿',
+  processing: '处理中',
+  completed: '已完成',
+  cancelled: '已取消'
+};
+
+const DISCREPANCY_TYPE_LABELS = {
+  extra: '多扫（台账无此样本）',
+  missing: '漏扫（台账有但未扫到）',
+  mislocated: '库位不一致',
+  outbound_scanned: '已出库样本被扫到',
+  not_in_target: '不在盘点范围内'
+};
+
+const DISCREPANCY_STATUS_LABELS = {
+  pending: '待处理',
+  processing: '处理中',
+  resolved: '已解决',
+  ignored: '已忽略'
+};
+
+const ROLE_LABELS = {
+  admin: '管理员',
+  warehouse: '库管员'
+};
+
+let currentUser = null;
 
 function getLocationOccupancy(locationId) {
   const row = queryOne(
@@ -101,6 +133,254 @@ function addTimelineInTx(sampleId, actionType, fromLocation, toLocation, tempera
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `, [sampleId, actionType, fromLocation, toLocation, temperature, remark, operator]);
 }
+
+function requireAuth(req, res, next) {
+  if (!currentUser) {
+    return res.json({ success: false, error: '请先登录', needLogin: true });
+  }
+  req.user = currentUser;
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!currentUser) {
+    return res.json({ success: false, error: '请先登录', needLogin: true });
+  }
+  if (currentUser.role !== 'admin') {
+    return res.json({ success: false, error: '需要管理员权限', forbidden: true });
+  }
+  req.user = currentUser;
+  next();
+}
+
+function generateOrderNo() {
+  const now = new Date();
+  const dateStr = now.getFullYear().toString() +
+    (now.getMonth() + 1).toString().padStart(2, '0') +
+    now.getDate().toString().padStart(2, '0');
+  const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  return `PD${dateStr}${random}`;
+}
+
+function parseInventoryCSV(csvText) {
+  const lines = csvText.trim().split(/\r?\n/);
+  if (lines.length === 0) return [];
+
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const barcodeIdx = headers.findIndex(h => h.includes('条码') || h.includes('barcode'));
+  const locationIdx = headers.findIndex(h => h.includes('库位') || h.includes('location') || h.includes('位置'));
+  const timeIdx = headers.findIndex(h => h.includes('时间') || h.includes('time') || h.includes('scan'));
+
+  const results = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',').map(c => c.trim().replace(/^"|"$/g, ''));
+    if (cols.length === 0 || !cols[0]) continue;
+
+    const item = {
+      barcode: barcodeIdx >= 0 ? cols[barcodeIdx] : cols[0],
+      scanned_location_code: locationIdx >= 0 ? cols[locationIdx] : '',
+      scan_time: timeIdx >= 0 ? cols[timeIdx] : ''
+    };
+    if (item.barcode) {
+      results.push(item);
+    }
+  }
+  return results;
+}
+
+function getExpectedSamplesForInventory(order) {
+  let sql = `
+    SELECT s.id, s.barcode, s.status, s.current_location_id, sl.code as location_code
+    FROM samples s
+    LEFT JOIN storage_locations sl ON s.current_location_id = sl.id
+    WHERE s.status = 'in_storage'
+  `;
+  const params = [];
+
+  if (order.type === 'zone' && order.zone_id) {
+    sql += ' AND EXISTS (SELECT 1 FROM storage_locations sl2 WHERE sl2.id = s.current_location_id AND sl2.zone_id = ?)';
+    params.push(order.zone_id);
+  } else if (order.type === 'location' && order.location_id) {
+    sql += ' AND s.current_location_id = ?';
+    params.push(order.location_id);
+  }
+
+  return queryAll(sql, params);
+}
+
+function performInventoryMatch(orderId) {
+  const order = queryOne('SELECT * FROM inventory_orders WHERE id = ?', [orderId]);
+  if (!order) return null;
+
+  const scannedItems = queryAll('SELECT * FROM inventory_items WHERE inventory_order_id = ?', [orderId]);
+  const expectedSamples = getExpectedSamplesForInventory(order);
+
+  const scannedBarcodes = new Set(scannedItems.map(i => i.barcode));
+  const expectedBarcodes = new Set(expectedSamples.map(s => s.barcode));
+  const sampleMap = {};
+  expectedSamples.forEach(s => { sampleMap[s.barcode] = s; });
+
+  let matched = 0, extra = 0, missing = 0, mislocated = 0, outboundScanned = 0;
+
+  runTransaction(() => {
+    runInTx('DELETE FROM inventory_discrepancies WHERE inventory_order_id = ?', [orderId]);
+
+    scannedItems.forEach(item => {
+      const sample = sampleMap[item.barcode];
+      if (!sample) {
+        const existingSample = queryOne('SELECT * FROM samples WHERE barcode = ?', [item.barcode]);
+        if (existingSample) {
+          if (existingSample.status === 'outbound') {
+            runInTx(`
+              UPDATE inventory_items SET match_status = 'mismatch', discrepancy_type = 'outbound_scanned',
+              discrepancy_note = ?, sample_id = ?
+              WHERE id = ?
+            `, ['已出库样本被扫到', existingSample.id, item.id]);
+            runInTx(`
+              INSERT INTO inventory_discrepancies
+              (inventory_order_id, inventory_item_id, sample_id, barcode, type, description,
+               old_status, old_location_id, status)
+              VALUES (?, ?, ?, ?, 'outbound_scanned', ?, ?, ?, 'pending')
+            `, [orderId, item.id, existingSample.id, item.barcode,
+                `已出库样本被扫到，当前状态：${STATUS_LABELS[existingSample.status] || existingSample.status}`,
+                existingSample.status, existingSample.current_location_id]);
+            outboundScanned++;
+          } else if (!expectedBarcodes.has(item.barcode)) {
+            runInTx(`
+              UPDATE inventory_items SET match_status = 'mismatch', discrepancy_type = 'not_in_target',
+              discrepancy_note = ?, sample_id = ?
+              WHERE id = ?
+            `, ['样本不在盘点范围内', existingSample.id, item.id]);
+            runInTx(`
+              INSERT INTO inventory_discrepancies
+              (inventory_order_id, inventory_item_id, sample_id, barcode, type, description,
+               old_status, old_location_id, status)
+              VALUES (?, ?, ?, ?, 'not_in_target', ?, ?, ?, 'pending')
+            `, [orderId, item.id, existingSample.id, item.barcode,
+                '样本不在本次盘点的温区/库位范围内',
+                existingSample.status, existingSample.current_location_id]);
+            extra++;
+          }
+        } else {
+          runInTx(`
+            UPDATE inventory_items SET match_status = 'mismatch', discrepancy_type = 'extra',
+            discrepancy_note = ? WHERE id = ?
+          `, ['台账无此样本', item.id]);
+          runInTx(`
+            INSERT INTO inventory_discrepancies
+            (inventory_order_id, inventory_item_id, barcode, type, description, status)
+            VALUES (?, ?, ?, 'extra', ?, 'pending')
+          `, [orderId, item.id, item.barcode, '多扫：台账中无此条码记录']);
+          extra++;
+        }
+        return;
+      }
+
+      if (item.scanned_location_code && sample.location_code &&
+          item.scanned_location_code !== sample.location_code) {
+        runInTx(`
+          UPDATE inventory_items SET match_status = 'mismatch', discrepancy_type = 'mislocated',
+          discrepancy_note = ?, sample_id = ?, expected_location_id = ?, expected_location_code = ?
+          WHERE id = ?
+        `, [`库位不一致：期望${sample.location_code}，实际${item.scanned_location_code}`,
+            sample.id, sample.current_location_id, sample.location_code, item.id]);
+        runInTx(`
+          INSERT INTO inventory_discrepancies
+          (inventory_order_id, inventory_item_id, sample_id, barcode, type, description,
+           old_status, old_location_id, new_location_id, status)
+          VALUES (?, ?, ?, ?, 'mislocated', ?, ?, ?, (SELECT id FROM storage_locations WHERE code = ?), 'pending')
+        `, [orderId, item.id, sample.id, item.barcode,
+            `库位不一致：台账位置${sample.location_code}，扫码位置${item.scanned_location_code}`,
+            sample.status, sample.current_location_id, item.scanned_location_code]);
+        mislocated++;
+      } else {
+        runInTx(`
+          UPDATE inventory_items SET match_status = 'matched', sample_id = ?,
+          expected_location_id = ?, expected_location_code = ?
+          WHERE id = ?
+        `, [sample.id, sample.current_location_id, sample.location_code, item.id]);
+        matched++;
+      }
+    });
+
+    expectedSamples.forEach(sample => {
+      if (!scannedBarcodes.has(sample.barcode)) {
+        runInTx(`
+          INSERT INTO inventory_items
+          (inventory_order_id, barcode, sample_id, expected_location_id, expected_location_code,
+           match_status, discrepancy_type, discrepancy_note)
+          VALUES (?, ?, ?, ?, ?, 'mismatch', 'missing', ?)
+        `, [orderId, sample.barcode, sample.id, sample.current_location_id, sample.location_code, '漏扫：台账有但未扫到']);
+        const itemId = getLastInsertIdTx();
+        runInTx(`
+          INSERT INTO inventory_discrepancies
+          (inventory_order_id, inventory_item_id, sample_id, barcode, type, description,
+           old_status, old_location_id, status)
+          VALUES (?, ?, ?, ?, 'missing', ?, ?, ?, 'pending')
+        `, [orderId, itemId, sample.id, sample.barcode,
+            '漏扫：台账中存在但扫码数据中未找到',
+            sample.status, sample.current_location_id]);
+        missing++;
+      }
+    });
+
+    runInTx(`
+      UPDATE inventory_orders SET
+        status = 'processing',
+        total_expected = ?,
+        total_scanned = ?,
+        total_matched = ?,
+        total_extra = ?,
+        total_missing = ?,
+        total_mislocated = ?,
+        total_outbound_scanned = ?,
+        updated_at = datetime('now','localtime')
+      WHERE id = ?
+    `, [expectedSamples.length, scannedItems.length, matched, extra, missing, mislocated, outboundScanned, orderId]);
+  });
+
+  return queryOne('SELECT * FROM inventory_orders WHERE id = ?', [orderId]);
+}
+
+function getLastInsertIdTx() {
+  return getLastInsertIdInTx();
+}
+
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.json({ success: false, error: '用户名和密码必填' });
+  }
+  const user = queryOne('SELECT * FROM users WHERE username = ? AND password = ?', [username, password]);
+  if (!user) {
+    return res.json({ success: false, error: '用户名或密码错误' });
+  }
+  currentUser = {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    real_name: user.real_name,
+    role_label: ROLE_LABELS[user.role] || user.role
+  };
+  res.json({ success: true, data: currentUser });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  currentUser = null;
+  res.json({ success: true });
+});
+
+app.get('/api/auth/current', (req, res) => {
+  res.json({ success: true, data: currentUser });
+});
+
+app.get('/api/users', requireAdmin, (req, res) => {
+  const users = queryAll('SELECT id, username, role, real_name, created_at, updated_at FROM users ORDER BY id');
+  users.forEach(u => {
+    u.role_label = ROLE_LABELS[u.role] || u.role;
+  });
+  res.json({ success: true, data: users });
+});
 
 app.get('/api/zones', (req, res) => {
   const zones = queryAll('SELECT * FROM temperature_zones ORDER BY id');
@@ -580,6 +860,703 @@ app.get('/api/dashboard/stats', (req, res) => {
       tempExceptions, zoneMismatch,
       fullLocations,
       recentRisks
+    }
+  });
+});
+
+app.get('/api/inventory', requireAuth, (req, res) => {
+  const { keyword, status } = req.query;
+  let sql = `
+    SELECT io.*,
+      tz.name as zone_name,
+      sl.code as location_code, sl.name as location_name
+    FROM inventory_orders io
+    LEFT JOIN temperature_zones tz ON io.zone_id = tz.id
+    LEFT JOIN storage_locations sl ON io.location_id = sl.id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (keyword) {
+    sql += ' AND (io.order_no LIKE ? OR io.title LIKE ?)';
+    params.push(`%${keyword}%`, `%${keyword}%`);
+  }
+  if (status && status !== 'all') {
+    sql += ' AND io.status = ?';
+    params.push(status);
+  }
+  sql += ' ORDER BY io.id DESC';
+  const orders = queryAll(sql, params);
+  orders.forEach(o => {
+    o.status_label = INVENTORY_STATUS_LABELS[o.status] || o.status;
+  });
+  res.json({ success: true, data: orders });
+});
+
+app.get('/api/inventory/:id', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const order = queryOne(`
+    SELECT io.*,
+      tz.name as zone_name,
+      sl.code as location_code, sl.name as location_name
+    FROM inventory_orders io
+    LEFT JOIN temperature_zones tz ON io.zone_id = tz.id
+    LEFT JOIN storage_locations sl ON io.location_id = sl.id
+    WHERE io.id = ?
+  `, [id]);
+  if (!order) {
+    return res.json({ success: false, error: '盘点单不存在' });
+  }
+  order.status_label = INVENTORY_STATUS_LABELS[order.status] || order.status;
+
+  const items = queryAll(`
+    SELECT ii.*, s.batch_no, s.name, s.status as sample_status
+    FROM inventory_items ii
+    LEFT JOIN samples s ON ii.sample_id = s.id
+    WHERE ii.inventory_order_id = ?
+    ORDER BY ii.id
+  `, [id]);
+  items.forEach(i => {
+    i.status_label = i.match_status === 'matched' ? '匹配' :
+                     i.match_status === 'mismatch' ? '不匹配' : '待处理';
+    if (i.discrepancy_type) {
+      i.discrepancy_type_label = DISCREPANCY_TYPE_LABELS[i.discrepancy_type] || i.discrepancy_type;
+    }
+  });
+
+  const discrepancies = queryAll(`
+    SELECT id.*,
+      sl_old.code as old_location_code, sl_old.name as old_location_name,
+      sl_new.code as new_location_code, sl_new.name as new_location_name,
+      s.batch_no, s.name
+    FROM inventory_discrepancies id
+    LEFT JOIN storage_locations sl_old ON id.old_location_id = sl_old.id
+    LEFT JOIN storage_locations sl_new ON id.new_location_id = sl_new.id
+    LEFT JOIN samples s ON id.sample_id = s.id
+    WHERE id.inventory_order_id = ?
+    ORDER BY id.id
+  `, [id]);
+  discrepancies.forEach(d => {
+    d.type_label = DISCREPANCY_TYPE_LABELS[d.type] || d.type;
+    d.status_label = DISCREPANCY_STATUS_LABELS[d.status] || d.status;
+    if (d.old_status) {
+      d.old_status_label = STATUS_LABELS[d.old_status] || d.old_status;
+    }
+    if (d.new_status) {
+      d.new_status_label = STATUS_LABELS[d.new_status] || d.new_status;
+    }
+  });
+
+  res.json({ success: true, data: { order, items, discrepancies } });
+});
+
+app.post('/api/inventory', requireAuth, (req, res) => {
+  const { title, type, zone_id, location_id, remark } = req.body;
+  if (!title || !type) {
+    return res.json({ success: false, error: '盘点标题和类型必填' });
+  }
+  if (type === 'zone' && !zone_id) {
+    return res.json({ success: false, error: '按温区盘点时请选择温区' });
+  }
+  if (type === 'location' && !location_id) {
+    return res.json({ success: false, error: '按库位盘点时请选择库位' });
+  }
+
+  const orderNo = generateOrderNo();
+  try {
+    const info = run(`
+      INSERT INTO inventory_orders
+      (order_no, title, type, zone_id, location_id, status, operator, operator_id, remark)
+      VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+    `, [orderNo, title, type, zone_id || null, location_id || null,
+        currentUser.real_name || currentUser.username, currentUser.id, remark || '']);
+    res.json({ success: true, data: { id: info.lastInsertRowid, order_no: orderNo } });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/inventory/:id/import', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const { csv_text, rows } = req.body;
+
+  const order = queryOne('SELECT * FROM inventory_orders WHERE id = ?', [id]);
+  if (!order) {
+    return res.json({ success: false, error: '盘点单不存在' });
+  }
+  if (order.status === 'completed') {
+    return res.json({ success: false, error: '盘点单已完成，不能再导入' });
+  }
+
+  let items = [];
+  if (csv_text) {
+    items = parseInventoryCSV(csv_text);
+  } else if (rows && Array.isArray(rows)) {
+    items = rows.map(r => ({
+      barcode: (r.barcode || '').trim(),
+      scanned_location_code: (r.scanned_location_code || r.location_code || '').trim(),
+      scan_time: r.scan_time || ''
+    })).filter(r => r.barcode);
+  }
+
+  if (items.length === 0) {
+    return res.json({ success: false, error: '没有有效的扫码数据' });
+  }
+
+  const barcodes = new Set();
+  const duplicates = [];
+  const uniqueItems = [];
+  items.forEach((item, idx) => {
+    if (barcodes.has(item.barcode)) {
+      duplicates.push(`第${idx + 1}行: 条码 ${item.barcode} 重复，已跳过`);
+    } else {
+      barcodes.add(item.barcode);
+      uniqueItems.push(item);
+    }
+  });
+
+  try {
+    runTransaction(() => {
+      runInTx('DELETE FROM inventory_items WHERE inventory_order_id = ?', [id]);
+      runInTx('DELETE FROM inventory_discrepancies WHERE inventory_order_id = ?', [id]);
+
+      uniqueItems.forEach(item => {
+        runInTx(`
+          INSERT INTO inventory_items
+          (inventory_order_id, barcode, scanned_location_code, scan_time, match_status)
+          VALUES (?, ?, ?, ?, 'pending')
+        `, [id, item.barcode, item.scanned_location_code, item.scan_time || null]);
+      });
+
+      runInTx(`
+        UPDATE inventory_orders SET
+          total_scanned = ?,
+          updated_at = datetime('now','localtime')
+        WHERE id = ?
+      `, [uniqueItems.length, id]);
+    });
+
+    const result = performInventoryMatch(id);
+    res.json({
+      success: true,
+      data: {
+        imported: uniqueItems.length,
+        duplicates: duplicates.length,
+        duplicate_notes: duplicates,
+        order: result
+      }
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/inventory/:id/complete', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const order = queryOne('SELECT * FROM inventory_orders WHERE id = ?', [id]);
+  if (!order) {
+    return res.json({ success: false, error: '盘点单不存在' });
+  }
+  if (order.status === 'completed') {
+    return res.json({ success: false, error: '盘点单已完成' });
+  }
+
+  try {
+    run(`
+      UPDATE inventory_orders SET
+        status = 'completed',
+        completed_at = datetime('now','localtime'),
+        updated_at = datetime('now','localtime')
+      WHERE id = ?
+    `, [id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/inventory/:id/export/csv', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const orderData = queryOne(`
+    SELECT io.*,
+      tz.name as zone_name,
+      sl.code as location_code
+    FROM inventory_orders io
+    LEFT JOIN temperature_zones tz ON io.zone_id = tz.id
+    LEFT JOIN storage_locations sl ON io.location_id = sl.id
+    WHERE io.id = ?
+  `, [id]);
+  if (!orderData) {
+    return res.json({ success: false, error: '盘点单不存在' });
+  }
+
+  const items = queryAll(`
+    SELECT ii.*, s.batch_no, s.name, s.status as sample_status
+    FROM inventory_items ii
+    LEFT JOIN samples s ON ii.sample_id = s.id
+    WHERE ii.inventory_order_id = ?
+    ORDER BY ii.id
+  `, [id]);
+
+  const discrepancies = queryAll(`
+    SELECT id.*,
+      sl_old.code as old_location_code,
+      sl_new.code as new_location_code
+    FROM inventory_discrepancies id
+    LEFT JOIN storage_locations sl_old ON id.old_location_id = sl_old.id
+    LEFT JOIN storage_locations sl_new ON id.new_location_id = sl_new.id
+    WHERE id.inventory_order_id = ?
+    ORDER BY id.id
+  `, [id]);
+
+  const header = ['条码','批次号','名称','扫码库位','台账库位','匹配状态','差异类型','差异说明','处理状态','处理人','处理时间','处理原因'];
+  const statusMap = { pending: '待入库', in_storage: '在库', outbound: '已出库', scrapped: '已报废' };
+  const matchMap = { matched: '匹配', mismatch: '不匹配', pending: '待处理' };
+  const dispStatusMap = { pending: '待处理', processing: '处理中', resolved: '已解决', ignored: '已忽略' };
+
+  const dispMap = {};
+  discrepancies.forEach(d => {
+    dispMap[d.inventory_item_id] = d;
+  });
+
+  const lines = [header.join(',')];
+  items.forEach(item => {
+    const d = dispMap[item.id];
+    lines.push([
+      `"${item.barcode || ''}"`,
+      `"${item.batch_no || ''}"`,
+      `"${item.name || ''}"`,
+      `"${item.scanned_location_code || ''}"`,
+      `"${item.expected_location_code || ''}"`,
+      `"${matchMap[item.match_status] || item.match_status}"`,
+      `"${item.discrepancy_type ? (DISCREPANCY_TYPE_LABELS[item.discrepancy_type] || item.discrepancy_type) : ''}"`,
+      `"${item.discrepancy_note || ''}"`,
+      `"${d ? (dispStatusMap[d.status] || d.status) : ''}"`,
+      `"${d ? (d.handler || '') : ''}"`,
+      `"${d ? (d.handled_at || '') : ''}"`,
+      `"${d ? (d.handler_remark || '') : ''}"`
+    ].join(','));
+  });
+
+  const csv = '\ufeff' + lines.join('\r\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="inventory_${orderData.order_no}_${Date.now()}.csv"`);
+  res.send(csv);
+});
+
+app.post('/api/discrepancies/:id/note', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const { remark } = req.body;
+
+  const disp = queryOne('SELECT * FROM inventory_discrepancies WHERE id = ?', [id]);
+  if (!disp) {
+    return res.json({ success: false, error: '差异记录不存在' });
+  }
+
+  try {
+    run(`
+      UPDATE inventory_discrepancies SET
+        handler_remark = COALESCE(handler_remark, '') || ?,
+        handler = ?,
+        handler_id = ?,
+        status = 'processing',
+        updated_at = datetime('now','localtime')
+      WHERE id = ?
+    `, [`${currentUser.real_name || currentUser.username}: ${remark || ''}\n`,
+        currentUser.real_name || currentUser.username, currentUser.id, id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/discrepancies/:id/resolve', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { action, new_location_id, new_status, remark } = req.body;
+
+  const disp = queryOne('SELECT * FROM inventory_discrepancies WHERE id = ?', [id]);
+  if (!disp) {
+    return res.json({ success: false, error: '差异记录不存在' });
+  }
+
+  if (disp.status === 'resolved') {
+    return res.json({ success: false, error: '该差异已处理，不能重复操作' });
+  }
+
+  try {
+    if (action === 'correct_location' && disp.sample_id && new_location_id) {
+      const sample = queryOne('SELECT * FROM samples WHERE id = ?', [disp.sample_id]);
+      if (!sample) {
+        return res.json({ success: false, error: '样本不存在' });
+      }
+      if (sample.status !== 'in_storage') {
+        return res.json({ success: false, error: '样本不在库，无法修正位置' });
+      }
+
+      const newLoc = getLocationWithZone(new_location_id);
+      if (!newLoc) {
+        return res.json({ success: false, error: '目标库位不存在' });
+      }
+
+      const oldLocId = sample.current_location_id;
+
+      runTransaction(() => {
+        runInTx(`
+          UPDATE samples SET
+            current_location_id = ?,
+            updated_at = datetime('now','localtime')
+          WHERE id = ?
+        `, [new_location_id, disp.sample_id]);
+
+        addTimelineInTx(disp.sample_id, 'inventory_correction', oldLocId, new_location_id,
+          null, `盘点纠错：${remark || '修正库位位置'}`,
+          currentUser.real_name || currentUser.username);
+
+        runInTx(`
+          UPDATE inventory_discrepancies SET
+            status = 'resolved',
+            handler = ?,
+            handler_id = ?,
+            handled_at = datetime('now','localtime'),
+            handler_remark = COALESCE(handler_remark, '') || ?,
+            updated_at = datetime('now','localtime')
+          WHERE id = ?
+        `, [currentUser.real_name || currentUser.username, currentUser.id,
+            `${currentUser.real_name || currentUser.username}: 位置已修正\n`, id]);
+      });
+    } else if (action === 'ignore') {
+      run(`
+        UPDATE inventory_discrepancies SET
+          status = 'ignored',
+          handler = ?,
+          handler_id = ?,
+          handled_at = datetime('now','localtime'),
+          handler_remark = COALESCE(handler_remark, '') || ?,
+          updated_at = datetime('now','localtime')
+        WHERE id = ?
+      `, [currentUser.real_name || currentUser.username, currentUser.id,
+          `${currentUser.real_name || currentUser.username}: 忽略，原因：${remark || '无'}\n`, id]);
+    } else if (action === 'register_extra' && disp.type === 'extra') {
+      const existing = queryOne('SELECT id FROM samples WHERE barcode = ?', [disp.barcode]);
+      if (existing) {
+        return res.json({ success: false, error: '条码已存在，不能重复登记' });
+      }
+      const batchNo = req.body.batch_no || 'PD-BATCH-' + Date.now();
+      runTransaction(() => {
+        const info = runInTx(`
+          INSERT INTO samples (barcode, batch_no, name, status)
+          VALUES (?, ?, ?, 'pending')
+        `, [disp.barcode, batchNo, req.body.name || '盘点补登样本']);
+        addTimelineInTx(info.lastInsertRowid, 'register', null, null,
+          null, `盘点补登：${remark || '多扫样本补登'}`,
+          currentUser.real_name || currentUser.username);
+        runInTx(`
+          UPDATE inventory_discrepancies SET
+            status = 'resolved',
+            sample_id = ?,
+            handler = ?,
+            handler_id = ?,
+            handled_at = datetime('now','localtime'),
+            handler_remark = COALESCE(handler_remark, '') || ?,
+            updated_at = datetime('now','localtime')
+          WHERE id = ?
+        `, [info.lastInsertRowid,
+            currentUser.real_name || currentUser.username, currentUser.id,
+            `${currentUser.real_name || currentUser.username}: 已补登样本\n`, id]);
+      });
+    } else {
+      return res.json({ success: false, error: '无效的处理操作' });
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/discrepancies', requireAuth, (req, res) => {
+  const { sample_id, barcode, status, inventory_order_id } = req.query;
+  let sql = `
+    SELECT id.*,
+      io.order_no, io.title,
+      sl_old.code as old_location_code, sl_old.name as old_location_name,
+      sl_new.code as new_location_code, sl_new.name as new_location_name,
+      s.batch_no, s.name as sample_name, s.status as sample_status
+    FROM inventory_discrepancies id
+    LEFT JOIN inventory_orders io ON id.inventory_order_id = io.id
+    LEFT JOIN storage_locations sl_old ON id.old_location_id = sl_old.id
+    LEFT JOIN storage_locations sl_new ON id.new_location_id = sl_new.id
+    LEFT JOIN samples s ON id.sample_id = s.id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (sample_id) {
+    sql += ' AND id.sample_id = ?';
+    params.push(sample_id);
+  }
+  if (barcode) {
+    sql += ' AND id.barcode LIKE ?';
+    params.push(`%${barcode}%`);
+  }
+  if (status && status !== 'all') {
+    sql += ' AND id.status = ?';
+    params.push(status);
+  }
+  if (inventory_order_id) {
+    sql += ' AND id.inventory_order_id = ?';
+    params.push(inventory_order_id);
+  }
+  sql += ' ORDER BY id.id DESC';
+  const items = queryAll(sql, params);
+  items.forEach(d => {
+    d.type_label = DISCREPANCY_TYPE_LABELS[d.type] || d.type;
+    d.status_label = DISCREPANCY_STATUS_LABELS[d.status] || d.status;
+  });
+  res.json({ success: true, data: items });
+});
+
+app.get('/api/samples/:id/reversable-actions', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const timeline = queryAll(`
+    SELECT st.*,
+      sl_from.code as from_code, sl_from.name as from_name,
+      sl_to.code as to_code, sl_to.name as to_name
+    FROM sample_timeline st
+    LEFT JOIN storage_locations sl_from ON st.from_location_id = sl_from.id
+    LEFT JOIN storage_locations sl_to ON st.to_location_id = sl_to.id
+    WHERE st.sample_id = ?
+      AND st.action_type IN ('transfer', 'scrapped')
+      AND NOT EXISTS (SELECT 1 FROM action_reversals ar WHERE ar.original_timeline_id = st.id)
+    ORDER BY st.id DESC
+    LIMIT 5
+  `, [id]);
+  timeline.forEach(t => {
+    t.action_label = ACTION_LABELS[t.action_type] || t.action_type;
+  });
+  res.json({ success: true, data: timeline });
+});
+
+app.post('/api/samples/:id/reverse/:timelineId', requireAdmin, (req, res) => {
+  const { id, timelineId } = req.params;
+  const { reason, remark } = req.body;
+
+  if (!reason) {
+    return res.json({ success: false, error: '请填写撤销原因' });
+  }
+
+  const original = queryOne('SELECT * FROM sample_timeline WHERE id = ? AND sample_id = ?', [timelineId, id]);
+  if (!original) {
+    return res.json({ success: false, error: '原操作记录不存在' });
+  }
+
+  const alreadyReversed = queryOne('SELECT id FROM action_reversals WHERE original_timeline_id = ?', [timelineId]);
+  if (alreadyReversed) {
+    return res.json({ success: false, error: '该操作已被撤销，不能重复撤销' });
+  }
+
+  if (original.action_type !== 'transfer' && original.action_type !== 'scrapped') {
+    return res.json({ success: false, error: '只能撤销转移或报废操作' });
+  }
+
+  const sample = queryOne('SELECT * FROM samples WHERE id = ?', [id]);
+  if (!sample) {
+    return res.json({ success: false, error: '样本不存在' });
+  }
+
+  if (original.action_type === 'transfer') {
+    if (sample.status !== 'in_storage') {
+      return res.json({ success: false, error: '样本已出库或报废，无法撤销转移' });
+    }
+    if (sample.current_location_id !== original.to_location_id) {
+      return res.json({ success: false, error: '样本位置已变更，无法撤销该次转移' });
+    }
+
+    const fromLoc = getLocationWithZone(original.from_location_id);
+    if (!fromLoc) {
+      return res.json({ success: false, error: '原位置不存在，无法撤销' });
+    }
+
+    const occupancy = getLocationOccupancy(original.from_location_id);
+    if (occupancy >= fromLoc.capacity) {
+      return res.json({ success: false, error: `原位置已满（容量${fromLoc.capacity}），无法撤销` });
+    }
+
+    try {
+      let reversalTimelineId = null;
+      runTransaction(() => {
+        runInTx(`
+          UPDATE samples SET
+            current_location_id = ?,
+            updated_at = datetime('now','localtime')
+          WHERE id = ?
+        `, [original.from_location_id, id]);
+
+        const tl = addTimelineInTx(id, 'reverse_transfer', original.to_location_id, original.from_location_id,
+          null, `撤销转移：${reason}${remark ? ' - ' + remark : ''}`,
+          currentUser.real_name || currentUser.username);
+        reversalTimelineId = tl.lastInsertRowid;
+
+        runInTx(`
+          INSERT INTO action_reversals
+          (original_timeline_id, sample_id, original_action_type, reversed_by, reversed_by_id,
+           reason, reversal_remark, reversal_timeline_id)
+          VALUES (?, ?, 'transfer', ?, ?, ?, ?, ?)
+        `, [timelineId, id,
+            currentUser.real_name || currentUser.username, currentUser.id,
+            reason, remark || '', reversalTimelineId]);
+      });
+      res.json({ success: true });
+    } catch (e) {
+      res.json({ success: false, error: e.message });
+    }
+  } else if (original.action_type === 'scrapped') {
+    if (sample.status !== 'scrapped') {
+      return res.json({ success: false, error: '样本当前不是报废状态，无法撤销报废' });
+    }
+    if (!original.from_location_id) {
+      return res.json({ success: false, error: '原位置信息丢失，无法撤销报废' });
+    }
+
+    const fromLoc = getLocationWithZone(original.from_location_id);
+    if (!fromLoc) {
+      return res.json({ success: false, error: '原位置不存在，无法撤销' });
+    }
+
+    const occupancy = getLocationOccupancy(original.from_location_id);
+    if (occupancy >= fromLoc.capacity) {
+      return res.json({ success: false, error: `原位置已满（容量${fromLoc.capacity}），无法撤销` });
+    }
+
+    try {
+      let reversalTimelineId = null;
+      runTransaction(() => {
+        runInTx(`
+          UPDATE samples SET
+            status = 'in_storage',
+            current_location_id = ?,
+            updated_at = datetime('now','localtime')
+          WHERE id = ?
+        `, [original.from_location_id, id]);
+
+        const tl = addTimelineInTx(id, 'reverse_scrapped', null, original.from_location_id,
+          null, `撤销报废：${reason}${remark ? ' - ' + remark : ''}`,
+          currentUser.real_name || currentUser.username);
+        reversalTimelineId = tl.lastInsertRowid;
+
+        runInTx(`
+          INSERT INTO action_reversals
+          (original_timeline_id, sample_id, original_action_type, reversed_by, reversed_by_id,
+           reason, reversal_remark, reversal_timeline_id)
+          VALUES (?, ?, 'scrapped', ?, ?, ?, ?, ?)
+        `, [timelineId, id,
+            currentUser.real_name || currentUser.username, currentUser.id,
+            reason, remark || '', reversalTimelineId]);
+      });
+      res.json({ success: true });
+    } catch (e) {
+      res.json({ success: false, error: e.message });
+    }
+  } else {
+    res.json({ success: false, error: '不支持的撤销操作类型' });
+  }
+});
+
+app.get('/api/history/search', requireAuth, (req, res) => {
+  const { barcode, batch_no, inventory_order_id, start_date, end_date } = req.query;
+
+  let samples = [];
+  if (barcode) {
+    samples = queryAll(`
+      SELECT s.*, sl.code as location_code, tz.name as zone_name
+      FROM samples s
+      LEFT JOIN storage_locations sl ON s.current_location_id = sl.id
+      LEFT JOIN temperature_zones tz ON sl.zone_id = tz.id
+      WHERE s.barcode LIKE ?
+      ORDER BY s.id DESC
+    `, [`%${barcode}%`]);
+  } else if (batch_no) {
+    samples = queryAll(`
+      SELECT s.*, sl.code as location_code, tz.name as zone_name
+      FROM samples s
+      LEFT JOIN storage_locations sl ON s.current_location_id = sl.id
+      LEFT JOIN temperature_zones tz ON sl.zone_id = tz.id
+      WHERE s.batch_no LIKE ?
+      ORDER BY s.id DESC
+    `, [`%${batch_no}%`]);
+  }
+
+  samples.forEach(s => {
+    s.status_label = STATUS_LABELS[s.status] || s.status;
+    s.timeline = getSampleTimeline(s.id);
+    s.timeline.forEach(t => {
+      t.action_label = ACTION_LABELS[t.action_type] || t.action_type;
+    });
+
+    s.discrepancies = queryAll(`
+      SELECT id.*, io.order_no, io.title
+      FROM inventory_discrepancies id
+      LEFT JOIN inventory_orders io ON id.inventory_order_id = io.id
+      WHERE id.sample_id = ?
+      ORDER BY id.id DESC
+    `, [s.id]);
+    s.discrepancies.forEach(d => {
+      d.type_label = DISCREPANCY_TYPE_LABELS[d.type] || d.type;
+      d.status_label = DISCREPANCY_STATUS_LABELS[d.status] || d.status;
+    });
+
+    s.reversals = queryAll(`
+      SELECT ar.*,
+        ot.action_type as original_action,
+        rt.action_type as reversal_action,
+        ot.created_at as original_time,
+        rt.created_at as reversal_time
+      FROM action_reversals ar
+      LEFT JOIN sample_timeline ot ON ar.original_timeline_id = ot.id
+      LEFT JOIN sample_timeline rt ON ar.reversal_timeline_id = rt.id
+      WHERE ar.sample_id = ?
+      ORDER BY ar.id DESC
+    `, [s.id]);
+  });
+
+  let orders = [];
+  if (inventory_order_id) {
+    orders = queryAll(`
+      SELECT io.*, tz.name as zone_name, sl.code as location_code
+      FROM inventory_orders io
+      LEFT JOIN temperature_zones tz ON io.zone_id = tz.id
+      LEFT JOIN storage_locations sl ON io.location_id = sl.id
+      WHERE io.order_no LIKE ? OR io.id = ?
+      ORDER BY io.id DESC
+    `, [`%${inventory_order_id}%`, isNaN(inventory_order_id) ? 0 : parseInt(inventory_order_id)]);
+  } else if (start_date || end_date) {
+    let sql = `
+      SELECT io.*, tz.name as zone_name, sl.code as location_code
+      FROM inventory_orders io
+      LEFT JOIN temperature_zones tz ON io.zone_id = tz.id
+      LEFT JOIN storage_locations sl ON io.location_id = sl.id
+      WHERE 1=1
+    `;
+    const params = [];
+    if (start_date) {
+      sql += ' AND date(io.created_at) >= date(?)';
+      params.push(start_date);
+    }
+    if (end_date) {
+      sql += ' AND date(io.created_at) <= date(?)';
+      params.push(end_date);
+    }
+    sql += ' ORDER BY io.id DESC LIMIT 100';
+    orders = queryAll(sql, params);
+  }
+
+  orders.forEach(o => {
+    o.status_label = INVENTORY_STATUS_LABELS[o.status] || o.status;
+  });
+
+  res.json({
+    success: true,
+    data: {
+      samples,
+      inventory_orders: orders
     }
   });
 });

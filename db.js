@@ -89,12 +89,114 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'warehouse',
+      real_name TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventory_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_no TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'zone',
+      zone_id INTEGER,
+      location_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'draft',
+      total_expected INTEGER DEFAULT 0,
+      total_scanned INTEGER DEFAULT 0,
+      total_matched INTEGER DEFAULT 0,
+      total_extra INTEGER DEFAULT 0,
+      total_missing INTEGER DEFAULT 0,
+      total_mislocated INTEGER DEFAULT 0,
+      total_outbound_scanned INTEGER DEFAULT 0,
+      operator TEXT NOT NULL,
+      operator_id INTEGER,
+      remark TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      completed_at TEXT
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventory_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inventory_order_id INTEGER NOT NULL,
+      barcode TEXT NOT NULL,
+      scanned_location_code TEXT,
+      scan_time TEXT,
+      sample_id INTEGER,
+      expected_location_id INTEGER,
+      expected_location_code TEXT,
+      match_status TEXT NOT NULL DEFAULT 'pending',
+      discrepancy_type TEXT,
+      discrepancy_note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventory_discrepancies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inventory_order_id INTEGER NOT NULL,
+      inventory_item_id INTEGER,
+      sample_id INTEGER,
+      barcode TEXT NOT NULL,
+      type TEXT NOT NULL,
+      description TEXT NOT NULL,
+      old_status TEXT,
+      old_location_id INTEGER,
+      new_status TEXT,
+      new_location_id INTEGER,
+      handler_remark TEXT,
+      handler TEXT,
+      handler_id INTEGER,
+      handled_at TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS action_reversals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      original_timeline_id INTEGER NOT NULL,
+      sample_id INTEGER NOT NULL,
+      original_action_type TEXT NOT NULL,
+      reversed_by TEXT NOT NULL,
+      reversed_by_id INTEGER,
+      reason TEXT NOT NULL,
+      reversal_remark TEXT,
+      reversal_timeline_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_barcode ON samples(barcode)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_status ON samples(status)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_timeline_sample_id ON sample_timeline(sample_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_timeline_action ON sample_timeline(action_type)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_locations_zone ON storage_locations(zone_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_inventory_orders_status ON inventory_orders(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_inventory_orders_type ON inventory_orders(type)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_inventory_items_order ON inventory_items(inventory_order_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_inventory_items_barcode ON inventory_items(barcode)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_discrepancies_order ON inventory_discrepancies(inventory_order_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_discrepancies_sample ON inventory_discrepancies(sample_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_discrepancies_status ON inventory_discrepancies(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_reversals_sample ON action_reversals(sample_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_reversals_original ON action_reversals(original_timeline_id)`);
   } catch(e) {}
 
   const zoneCount = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones')[0].values[0][0];
@@ -116,6 +218,13 @@ async function initDatabase() {
     db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('F-B2', '冷冻区B架2层', ${zoneMap['冷冻(-20℃)']}, 15, '冷冻库位')`);
     db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('D-C1', '深冻区C架1层', ${zoneMap['深冻(-80℃)']}, 10, '深冻库位')`);
     db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('N-D1', '常温区D架1层', ${zoneMap['常温(15-25℃)']}, 30, '常温库位')`);
+  }
+
+  const userCount = db.exec('SELECT COUNT(*) as cnt FROM users')[0].values[0][0];
+  if (userCount === 0) {
+    db.run(`INSERT INTO users (username, password, role, real_name) VALUES ('admin', 'admin123', 'admin', '系统管理员')`);
+    db.run(`INSERT INTO users (username, password, role, real_name) VALUES ('warehouse', 'wh123', 'warehouse', '仓库管理员')`);
+    db.run(`INSERT INTO users (username, password, role, real_name) VALUES ('manager', 'mgr123', 'admin', '部门经理')`);
   }
 
   saveDatabase();
@@ -209,6 +318,10 @@ function runInTx(sql, params = []) {
   };
 }
 
+function getLastInsertIdInTx() {
+  return getLastInsertId();
+}
+
 module.exports = {
   initDatabase,
   queryAll,
@@ -219,5 +332,6 @@ module.exports = {
   runInTx,
   beginTransaction,
   commitTransaction,
-  rollbackTransaction
+  rollbackTransaction,
+  getLastInsertIdInTx
 };
