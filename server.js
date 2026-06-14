@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+app.use(loadUser);
 app.use(express.static(path.join(__dirname, 'public')));
 
 const STATUS_LABELS = {
@@ -120,7 +121,26 @@ const AUDIT_OBJECT_LABELS = {
   label_reprint: '标签补打'
 };
 
+const sessions = new Map();
 let currentUser = null;
+
+function generateSessionId() {
+  return 'sess_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 10);
+}
+
+function getSessionUser(req) {
+  const cookieHeader = req.headers.cookie || '';
+  const match = cookieHeader.match(/sessionId=([^;]+)/);
+  if (!match) return null;
+  const sessionId = match[1];
+  return sessions.get(sessionId) || null;
+}
+
+function loadUser(req, res, next) {
+  req.user = getSessionUser(req);
+  currentUser = req.user;
+  next();
+}
 
 const batchTransitionLocks = new Map();
 
@@ -140,8 +160,9 @@ function getClientIp(req) {
 
 function addAuditLog(req, actionType, objectType, objectId, beforeValue, afterValue, remark) {
   const ip = getClientIp(req);
-  const opId = currentUser ? currentUser.id : null;
-  const opName = currentUser ? (currentUser.real_name || currentUser.username) : null;
+  const user = req.user || getSessionUser(req);
+  const opId = user ? user.id : null;
+  const opName = user ? (user.real_name || user.username) : null;
   try {
     insertAuditLog({
       operator_id: opId,
@@ -161,8 +182,9 @@ function addAuditLog(req, actionType, objectType, objectId, beforeValue, afterVa
 
 function addAuditLogInTx(req, actionType, objectType, objectId, beforeValue, afterValue, remark) {
   const ip = getClientIp(req);
-  const opId = currentUser ? currentUser.id : null;
-  const opName = currentUser ? (currentUser.real_name || currentUser.username) : null;
+  const user = req.user || getSessionUser(req);
+  const opId = user ? user.id : null;
+  const opName = user ? (user.real_name || user.username) : null;
   insertAuditLogInTx({
     operator_id: opId,
     operator_name: opName,
@@ -251,69 +273,76 @@ function addTimelineInTx(sampleId, actionType, fromLocation, toLocation, tempera
 }
 
 function requireAuth(req, res, next) {
-  if (!currentUser) {
+  const user = req.user || getSessionUser(req);
+  if (!user) {
     return res.json({ success: false, error: '请先登录', needLogin: true });
   }
-  req.user = currentUser;
+  req.user = user;
   next();
 }
 
 function requireAdmin(req, res, next) {
-  if (!currentUser) {
+  const user = req.user || getSessionUser(req);
+  if (!user) {
     return res.json({ success: false, error: '请先登录', needLogin: true });
   }
-  if (currentUser.role !== 'admin') {
+  if (user.role !== 'admin') {
     return res.json({ success: false, error: '需要管理员权限', forbidden: true });
   }
-  req.user = currentUser;
+  req.user = user;
   next();
 }
 
 function requireWrite(req, res, next) {
-  if (!currentUser) {
+  const user = req.user || getSessionUser(req);
+  if (!user) {
     return res.json({ success: false, error: '请先登录', needLogin: true });
   }
-  if (currentUser.role === 'viewer') {
+  if (user.role === 'viewer') {
     return res.json({ success: false, error: '只读用户无写入权限', forbidden: true });
   }
-  req.user = currentUser;
+  req.user = user;
   next();
 }
 
-function getAccessibleZoneIds() {
-  if (!currentUser) return [];
-  if (currentUser.role === 'admin') return null; // null 表示全部可访问
-  return getUserZoneIds(currentUser.id);
+function getAccessibleZoneIds(user) {
+  const u = user || currentUser;
+  if (!u) return [];
+  if (u.role === 'admin') return null;
+  return getUserZoneIds(u.id);
 }
 
-function canAccessZone(zoneId) {
-  if (!currentUser) return false;
-  if (currentUser.role === 'admin') return true;
+function canAccessZone(zoneId, user) {
+  const u = user || currentUser;
+  if (!u) return false;
+  if (u.role === 'admin') return true;
   if (zoneId == null) return false;
-  const allowed = getUserZoneIds(currentUser.id);
+  const allowed = getUserZoneIds(u.id);
   return allowed.includes(parseInt(zoneId));
 }
 
-function canAccessLocation(locationId) {
-  if (!currentUser) return false;
-  if (currentUser.role === 'admin') return true;
+function canAccessLocation(locationId, user) {
+  const u = user || currentUser;
+  if (!u) return false;
+  if (u.role === 'admin') return true;
   if (!locationId) return false;
   const loc = queryOne('SELECT zone_id FROM storage_locations WHERE id = ?', [locationId]);
   if (!loc) return false;
-  return canAccessZone(loc.zone_id);
+  return canAccessZone(loc.zone_id, u);
 }
 
-function canAccessSample(sampleId) {
-  if (!currentUser) return false;
-  if (currentUser.role === 'admin') return true;
+function canAccessSample(sampleId, user) {
+  const u = user || currentUser;
+  if (!u) return false;
+  if (u.role === 'admin') return true;
   if (!sampleId) return false;
   const sample = queryOne('SELECT current_location_id, required_zone_id, status FROM samples WHERE id = ?', [sampleId]);
   if (!sample) return false;
   if (sample.current_location_id) {
-    return canAccessLocation(sample.current_location_id);
+    return canAccessLocation(sample.current_location_id, u);
   }
   if (sample.required_zone_id) {
-    return canAccessZone(sample.required_zone_id);
+    return canAccessZone(sample.required_zone_id, u);
   }
   return false;
 }
@@ -521,7 +550,7 @@ app.post('/api/auth/login', (req, res) => {
     addAuditLog(req, 'login', 'user', username, null, null, '登录失败：用户名或密码错误');
     return res.json({ success: false, error: '用户名或密码错误' });
   }
-  currentUser = {
+  const userData = {
     id: user.id,
     username: user.username,
     role: user.role,
@@ -529,27 +558,39 @@ app.post('/api/auth/login', (req, res) => {
     role_label: ROLE_LABELS[user.role] || user.role,
     zone_ids: getUserZoneIds(user.id)
   };
+  const sessionId = generateSessionId();
+  sessions.set(sessionId, userData);
+  req.user = userData;
+  currentUser = userData;
+  res.setHeader('Set-Cookie', `sessionId=${sessionId}; Path=/; HttpOnly; SameSite=Lax`);
   addAuditLog(req, 'login', 'user', user.id,
     null,
     { id: user.id, username: user.username, role: user.role, real_name: user.real_name },
     '登录成功');
-  res.json({ success: true, data: currentUser });
+  res.json({ success: true, data: userData });
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  const userId = currentUser ? currentUser.id : null;
-  const userName = currentUser ? (currentUser.real_name || currentUser.username) : null;
-  const userData = currentUser ? { ...currentUser } : null;
+  const user = req.user || getSessionUser(req);
+  const userId = user ? user.id : null;
+  const userName = user ? (user.real_name || user.username) : null;
+  const userData = user ? { ...user } : null;
   addAuditLog(req, 'logout', 'user', userId,
     userData,
     null,
     userName ? `${userName} 登出` : '登出');
+  const cookieHeader = req.headers.cookie || '';
+  const match = cookieHeader.match(/sessionId=([^;]+)/);
+  if (match) {
+    sessions.delete(match[1]);
+  }
+  req.user = null;
   currentUser = null;
   res.json({ success: true });
 });
 
-app.get('/api/auth/current', (req, res) => {
-  res.json({ success: true, data: currentUser });
+app.get('/api/auth/current', requireAuth, (req, res) => {
+  res.json({ success: true, data: req.user });
 });
 
 app.get('/api/users', requireAdmin, (req, res) => {
@@ -3674,7 +3715,7 @@ app.post('/api/samples/:id/reprint-label', requireWrite, (req, res) => {
     return res.json({ success: false, error: '样本不存在' });
   }
 
-  if (!canAccessSample(id)) {
+  if (!canAccessSample(id, req.user)) {
     return res.json({ success: false, error: '无权操作该样本', forbidden: true });
   }
 
@@ -3702,8 +3743,8 @@ app.post('/api/samples/:id/reprint-label', requireWrite, (req, res) => {
     });
   }
 
-  const operatorName = currentUser.real_name || currentUser.username;
-  const operatorId = currentUser.id;
+  const operatorName = req.user.real_name || req.user.username;
+  const operatorId = req.user.id;
   const now = new Date();
   const pad = n => String(n).padStart(2, '0');
   const reprintTime = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
@@ -3799,7 +3840,7 @@ app.post('/api/samples/:id/reprint-label', requireWrite, (req, res) => {
 app.get('/api/label-reprints', requireAuth, (req, res) => {
   const { barcode, batch_no, page, page_size } = req.query;
 
-  const accessibleZones = getAccessibleZoneIds();
+  const accessibleZones = getAccessibleZoneIds(req.user);
 
   const filters = {
     barcode: barcode || '',
@@ -3826,7 +3867,7 @@ app.get('/api/label-reprints', requireAuth, (req, res) => {
 app.get('/api/label-reprints/export/csv', requireAuth, (req, res) => {
   const { barcode, batch_no } = req.query;
 
-  const accessibleZones = getAccessibleZoneIds();
+  const accessibleZones = getAccessibleZoneIds(req.user);
 
   const filters = {
     barcode: barcode || '',

@@ -437,6 +437,26 @@ curl -b cookies.txt "http://localhost:3000/api/history/search?batch_no=BATCH-验
 curl -b cookies.txt "http://localhost:3000/api/history/search?inventory_order_id=$INV_ID"
 ```
 
+### 6. 标签补打
+
+```bash
+# 6.1 给样本补打标签（在库/待入库样本才能补打）
+curl -b cookies.txt -X POST http://localhost:3000/api/samples/$SID1/reprint-label ^
+  -H "Content-Type: application/json" ^
+  -d "{\"reason\":\"标签磨损\",\"copies\":2}"
+# 返回标签预览数据：包含条码、批次、温区、当前库位、补打时间、操作人
+
+# 6.2 查询补打记录列表
+curl -b cookies.txt "http://localhost:3000/api/label-reprints?page=1&page_size=10"
+# 支持按条码、批次筛选：
+curl -b cookies.txt "http://localhost:3000/api/label-reprints?barcode=验收-S1"
+curl -b cookies.txt "http://localhost:3000/api/label-reprints?batch_no=BATCH-验收"
+
+# 6.3 导出补打记录 CSV
+curl -b cookies.txt "http://localhost:3000/api/label-reprints/export/csv" ^
+  -o label_reprints.csv
+```
+
 ---
 
 ## 非法场景拦截验证

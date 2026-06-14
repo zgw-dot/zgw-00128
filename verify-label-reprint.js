@@ -497,9 +497,9 @@ async function main() {
     // ===== [21] 分页验证 =====
     console.log('\n[21] 分页验证');
     const page1 = await api('/api/label-reprints?page=1&page_size=2',
-      { cookie: adminSession.cookie });
+      { cookie: restartAdmin.cookie });
     const page2 = await api('/api/label-reprints?page=2&page_size=2',
-      { cookie: adminSession.cookie });
+      { cookie: restartAdmin.cookie });
     assert(page1.body.data.page === 1, 'page1页码错误');
     assert(page2.body.data.page === 2, 'page2页码错误');
     assert(page1.body.data.page_size === 2, 'page_size错误');
