@@ -17,7 +17,9 @@ const STATUS_LABELS = {
   in_storage: '在库',
   outbound: '已出库',
   scrapped: '已报废',
-  reserved_outbound: '已预约出库'
+  reserved_outbound: '已预约出库',
+  borrowed: '已借出',
+  lost: '已丢失'
 };
 
 const ACTION_LABELS = {
@@ -30,7 +32,9 @@ const ACTION_LABELS = {
   reverse_transfer: '撤销转移',
   reverse_scrapped: '撤销报废',
   inventory_correction: '盘点纠错',
-  reserved_outbound: '预约出库'
+  reserved_outbound: '预约出库',
+  borrow_out: '领用出库',
+  borrow_return: '领用归还'
 };
 
 const RESERVATION_STATUS_LABELS = {
@@ -39,6 +43,13 @@ const RESERVATION_STATUS_LABELS = {
   used: '已使用',
   cancelled: '已取消',
   expired: '已过期'
+};
+
+const BORROWING_STATUS_LABELS = {
+  draft: '草稿',
+  borrowed: '已借出',
+  returned: '已归还',
+  overdue: '逾期'
 };
 
 const INVENTORY_STATUS_LABELS = {
@@ -86,7 +97,11 @@ const AUDIT_ACTION_LABELS = {
   reservation_confirm: '确认预约',
   reservation_use: '使用预约',
   reservation_cancel: '取消预约',
-  reservation_expire: '预约过期'
+  reservation_expire: '预约过期',
+  borrowing_create: '创建领用',
+  borrowing_borrow: '确认借出',
+  borrowing_return: '归还样本',
+  borrowing_overdue: '领用逾期'
 };
 
 const AUDIT_OBJECT_LABELS = {
@@ -98,7 +113,8 @@ const AUDIT_OBJECT_LABELS = {
   sample_import_batch: '导入批次',
   inventory_config: '库存配置',
   item_threshold: '物品阈值',
-  sample_reservation: '样本预约'
+  sample_reservation: '样本预约',
+  sample_borrowing: '样本领用'
 };
 
 let currentUser = null;
@@ -3232,6 +3248,391 @@ app.put('/api/reservations/:id/cancel', requireAuth, (req, res) => {
       { reservation_no: reservation.reservation_no, status: beforeStatus },
       { reservation_no: reservation.reservation_no, status: 'cancelled' },
       `取消预约单 ${reservation.reservation_no}${remark ? '：' + remark : ''}`);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+function generateBorrowingNo() {
+  const now = new Date();
+  const dateStr = now.getFullYear().toString() +
+    (now.getMonth() + 1).toString().padStart(2, '0') +
+    now.getDate().toString().padStart(2, '0');
+  const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  return `LY${dateStr}${random}`;
+}
+
+function markOverdueBorrowings() {
+  const today = new Date().toISOString().substring(0, 10);
+  const overdue = queryAll(`
+    SELECT * FROM sample_borrowings
+    WHERE status = 'borrowed'
+    AND expected_return_date < ?
+  `, [today]);
+
+  if (overdue.length === 0) return 0;
+
+  let count = 0;
+  runTransaction(() => {
+    for (const b of overdue) {
+      runInTx(`
+        UPDATE sample_borrowings
+        SET status = 'overdue', overdue_marked_at = datetime('now','localtime'),
+            updated_at = datetime('now','localtime')
+        WHERE id = ?
+      `, [b.id]);
+      insertAuditLogInTx({
+        operator_id: null,
+        operator_name: 'system',
+        ip_address: '127.0.0.1',
+        action_type: 'borrowing_overdue',
+        object_type: 'sample_borrowing',
+        object_id: String(b.id),
+        before_value: { borrowing_no: b.borrowing_no, status: 'borrowed', expected_return_date: b.expected_return_date },
+        after_value: { borrowing_no: b.borrowing_no, status: 'overdue' },
+        remark: `领用单 ${b.borrowing_no} 已逾期（应还日期: ${b.expected_return_date}）`
+      });
+      count++;
+    }
+  });
+  return count;
+}
+
+app.post('/api/borrowings', requireWrite, (req, res) => {
+  const { sample_barcode, expected_return_date, purpose, remark } = req.body;
+
+  if (!sample_barcode) return res.json({ success: false, error: '样本条码必填' });
+  if (!expected_return_date) return res.json({ success: false, error: '预计归还日期必填' });
+
+  const sample = queryOne('SELECT * FROM samples WHERE barcode = ?', [sample_barcode]);
+  if (!sample) return res.json({ success: false, error: '样本不存在' });
+
+  if (sample.status !== 'in_storage') {
+    return res.json({ success: false, error: `样本当前状态为"${STATUS_LABELS[sample.status] || sample.status}"，只有"在库"状态才能领用` });
+  }
+
+  const activeBorrowing = queryOne(`
+    SELECT * FROM sample_borrowings
+    WHERE sample_barcode = ? AND status IN ('draft', 'borrowed', 'overdue')
+  `, [sample_barcode]);
+  if (activeBorrowing) {
+    return res.json({
+      success: false,
+      error: `样本 ${sample_barcode} 已有未归还的领用单（${activeBorrowing.borrowing_no}，状态: ${BORROWING_STATUS_LABELS[activeBorrowing.status]}）`,
+      existing_borrowing: activeBorrowing
+    });
+  }
+
+  const borrowingNo = generateBorrowingNo();
+  try {
+    const info = run(`
+      INSERT INTO sample_borrowings
+      (borrowing_no, sample_id, sample_barcode, borrower_name, borrower_id,
+       expected_return_date, purpose, status, remark)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+    `, [borrowingNo, sample.id, sample_barcode,
+        currentUser.real_name || currentUser.username,
+        currentUser.id, expected_return_date, purpose || '', remark || '']);
+
+    addAuditLog(req, 'borrowing_create', 'sample_borrowing', String(info.lastInsertRowid),
+      null,
+      { borrowing_no: borrowingNo, sample_barcode, expected_return_date, purpose, status: 'draft' },
+      `创建领用单 ${borrowingNo}：样本 ${sample_barcode}，预计归还 ${expected_return_date}`);
+
+    res.json({ success: true, data: { id: info.lastInsertRowid, borrowing_no: borrowingNo } });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/borrowings', requireAuth, (req, res) => {
+  const { status, sample_barcode, keyword } = req.query;
+
+  markOverdueBorrowings();
+
+  let sql = `
+    SELECT sb.*,
+      s.name as sample_name, s.status as sample_status, s.batch_no,
+      sl.code as current_location_code,
+      rl.code as return_location_code, rl.name as return_location_name
+    FROM sample_borrowings sb
+    LEFT JOIN samples s ON sb.sample_id = s.id
+    LEFT JOIN storage_locations sl ON s.current_location_id = sl.id
+    LEFT JOIN storage_locations rl ON sb.return_location_id = rl.id
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (currentUser.role !== 'admin') {
+    sql += ' AND sb.borrower_id = ?';
+    params.push(currentUser.id);
+  }
+
+  if (status && status !== 'all') {
+    sql += ' AND sb.status = ?';
+    params.push(status);
+  }
+  if (sample_barcode) {
+    sql += ' AND sb.sample_barcode LIKE ?';
+    params.push(`%${sample_barcode}%`);
+  }
+  if (keyword) {
+    sql += ' AND (sb.borrowing_no LIKE ? OR sb.sample_barcode LIKE ? OR sb.borrower_name LIKE ? OR sb.purpose LIKE ?)';
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  }
+
+  sql += ' ORDER BY sb.id DESC';
+
+  const rows = queryAll(sql, params);
+  rows.forEach(r => {
+    r.status_label = BORROWING_STATUS_LABELS[r.status] || r.status;
+  });
+
+  res.json({ success: true, data: rows });
+});
+
+app.get('/api/borrowings/overdue', requireAuth, (req, res) => {
+  markOverdueBorrowings();
+
+  let sql = `
+    SELECT sb.*,
+      s.name as sample_name, s.status as sample_status, s.batch_no,
+      sl.code as current_location_code
+    FROM sample_borrowings sb
+    LEFT JOIN samples s ON sb.sample_id = s.id
+    LEFT JOIN storage_locations sl ON s.current_location_id = sl.id
+    WHERE sb.status IN ('borrowed', 'overdue')
+    AND sb.expected_return_date < date('now', 'localtime')
+  `;
+  const params = [];
+
+  if (currentUser.role !== 'admin') {
+    sql += ' AND sb.borrower_id = ?';
+    params.push(currentUser.id);
+  }
+
+  sql += ' ORDER BY sb.expected_return_date ASC';
+
+  const rows = queryAll(sql, params);
+  rows.forEach(r => {
+    r.status_label = BORROWING_STATUS_LABELS[r.status] || r.status;
+  });
+
+  res.json({ success: true, data: rows });
+});
+
+app.get('/api/borrowings/:id', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const borrowing = queryOne('SELECT * FROM sample_borrowings WHERE id = ?', [id]);
+  if (!borrowing) return res.json({ success: false, error: '领用单不存在' });
+
+  if (currentUser.role !== 'admin' && borrowing.borrower_id !== currentUser.id) {
+    return res.json({ success: false, error: '无权查看此领用单', forbidden: true });
+  }
+
+  borrowing.status_label = BORROWING_STATUS_LABELS[borrowing.status] || borrowing.status;
+
+  const sample = queryOne(`
+    SELECT s.*, sl.code as location_code, sl.name as location_name,
+      tz.name as zone_name, rz.name as required_zone_name
+    FROM samples s
+    LEFT JOIN storage_locations sl ON s.current_location_id = sl.id
+    LEFT JOIN temperature_zones tz ON sl.zone_id = tz.id
+    LEFT JOIN temperature_zones rz ON s.required_zone_id = rz.id
+    WHERE s.id = ?
+  `, [borrowing.sample_id]);
+  borrowing.sample_detail = sample;
+
+  if (borrowing.return_location_id) {
+    const returnLoc = queryOne(`
+      SELECT sl.*, tz.name as zone_name
+      FROM storage_locations sl
+      LEFT JOIN temperature_zones tz ON sl.zone_id = tz.id
+      WHERE sl.id = ?
+    `, [borrowing.return_location_id]);
+    borrowing.return_location_detail = returnLoc;
+  }
+
+  res.json({ success: true, data: borrowing });
+});
+
+app.put('/api/borrowings/:id/borrow', requireWrite, (req, res) => {
+  const { id } = req.params;
+  const { remark } = req.body;
+
+  const borrowing = queryOne('SELECT * FROM sample_borrowings WHERE id = ?', [id]);
+  if (!borrowing) return res.json({ success: false, error: '领用单不存在' });
+
+  if (currentUser.role !== 'admin' && borrowing.borrower_id !== currentUser.id) {
+    return res.json({ success: false, error: '无权操作此领用单', forbidden: true });
+  }
+
+  if (borrowing.status !== 'draft') {
+    return res.json({ success: false, error: `领用单当前状态为"${BORROWING_STATUS_LABELS[borrowing.status] || borrowing.status}"，只有草稿状态才能确认借出` });
+  }
+
+  const sample = queryOne('SELECT * FROM samples WHERE id = ?', [borrowing.sample_id]);
+  if (!sample) return res.json({ success: false, error: '关联样本不存在' });
+  if (sample.status !== 'in_storage') {
+    return res.json({ success: false, error: `样本当前状态为"${STATUS_LABELS[sample.status] || sample.status}"，不是在库状态，无法借出` });
+  }
+
+  const activeCheck = queryOne(`
+    SELECT * FROM sample_borrowings
+    WHERE sample_barcode = ? AND status IN ('draft', 'borrowed', 'overdue') AND id != ?
+  `, [borrowing.sample_barcode, id]);
+  if (activeCheck) {
+    return res.json({ success: false, error: `样本 ${borrowing.sample_barcode} 已有其他未归还的领用单（${activeCheck.borrowing_no}）` });
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const beforeStatus = borrowing.status;
+
+  try {
+    runTransaction(() => {
+      const fromLocId = sample.current_location_id;
+
+      runInTx(`
+        UPDATE samples SET status = 'borrowed', current_location_id = NULL,
+        updated_at = datetime('now','localtime')
+        WHERE id = ?
+      `, [sample.id]);
+
+      addTimelineInTx(sample.id, 'borrow_out', fromLocId, null, null,
+        `领用出库：领用单 ${borrowing.borrowing_no}${remark ? ' - ' + remark : ''}`, operator);
+
+      addAuditLogInTx(req, 'outbound', 'sample', String(sample.id),
+        { status: sample.status, current_location_id: fromLocId },
+        { status: 'borrowed', current_location_id: null, borrowing_no: borrowing.borrowing_no },
+        `领用出库：领用单 ${borrowing.borrowing_no}`);
+
+      runInTx(`
+        UPDATE sample_borrowings
+        SET status = 'borrowed', borrowed_at = datetime('now','localtime'),
+            updated_at = datetime('now','localtime'), remark = COALESCE(remark, '') || ?
+        WHERE id = ?
+      `, [remark ? ` [确认借出] ${remark}` : '', id]);
+    });
+
+    addAuditLog(req, 'borrowing_borrow', 'sample_borrowing', String(id),
+      { borrowing_no: borrowing.borrowing_no, status: beforeStatus, sample_barcode: borrowing.sample_barcode },
+      { borrowing_no: borrowing.borrowing_no, status: 'borrowed' },
+      `确认借出领用单 ${borrowing.borrowing_no}：样本 ${borrowing.sample_barcode}`);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.put('/api/borrowings/:id/return', requireWrite, (req, res) => {
+  const { id } = req.params;
+  const { return_location_id, sample_condition, return_remark } = req.body;
+
+  if (!return_location_id) return res.json({ success: false, error: '归还库位必填' });
+  if (!sample_condition) return res.json({ success: false, error: '样本状态必填（完好/损坏/遗失）' });
+
+  const validConditions = ['完好', '损坏', '遗失'];
+  if (!validConditions.includes(sample_condition)) {
+    return res.json({ success: false, error: `样本状态无效，可选值：${validConditions.join('/')}` });
+  }
+
+  const borrowing = queryOne('SELECT * FROM sample_borrowings WHERE id = ?', [id]);
+  if (!borrowing) return res.json({ success: false, error: '领用单不存在' });
+
+  if (currentUser.role !== 'admin' && borrowing.borrower_id !== currentUser.id) {
+    return res.json({ success: false, error: '无权操作此领用单', forbidden: true });
+  }
+
+  if (!['borrowed', 'overdue'].includes(borrowing.status)) {
+    return res.json({ success: false, error: `领用单当前状态为"${BORROWING_STATUS_LABELS[borrowing.status] || borrowing.status}"，只有已借出或逾期状态才能归还` });
+  }
+
+  const sample = queryOne('SELECT * FROM samples WHERE id = ?', [borrowing.sample_id]);
+  if (!sample) return res.json({ success: false, error: '关联样本不存在' });
+
+  const returnLoc = getLocationWithZone(return_location_id);
+  if (!returnLoc) return res.json({ success: false, error: '归还库位不存在' });
+  if (!canAccessLocation(return_location_id)) {
+    return res.json({ success: false, error: '无权操作该归还库位所属温区', forbidden: true });
+  }
+
+  if (sample_condition === '完好' || sample_condition === '损坏') {
+    const occupancy = getLocationOccupancy(return_location_id);
+    if (occupancy >= returnLoc.capacity) {
+      return res.json({ success: false, error: `归还库位已满（容量${returnLoc.capacity}）` });
+    }
+    if (sample.required_zone_id && returnLoc.zone_id !== sample.required_zone_id) {
+      return res.json({ success: false, error: `温区不匹配：样本应放${sample.required_zone_name || '指定温区'}，归还库位属于${returnLoc.zone_name}`, warning: true });
+    }
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const beforeStatus = borrowing.status;
+
+  try {
+    runTransaction(() => {
+      let newSampleStatus;
+      let newLocationId = null;
+
+      if (sample_condition === '完好') {
+        newSampleStatus = 'in_storage';
+        newLocationId = return_location_id;
+      } else if (sample_condition === '损坏') {
+        newSampleStatus = 'scrapped';
+        newLocationId = null;
+      } else {
+        newSampleStatus = 'lost';
+        newLocationId = null;
+      }
+
+      const beforeSample = { ...sample };
+      runInTx(`
+        UPDATE samples SET status = ?, current_location_id = ?,
+        updated_at = datetime('now','localtime')
+        WHERE id = ?
+      `, [newSampleStatus, newLocationId, sample.id]);
+
+      let timelineAction = 'borrow_return';
+      let timelineRemark = `领用归还：领用单 ${borrowing.borrowing_no}，样本状态=${sample_condition}${return_remark ? ' - ' + return_remark : ''}`;
+
+      if (sample_condition === '损坏') {
+        timelineAction = 'scrapped';
+        timelineRemark = `领用归还-损坏报废：领用单 ${borrowing.borrowing_no}${return_remark ? ' - ' + return_remark : ''}`;
+      } else if (sample_condition === '遗失') {
+        timelineRemark = `领用归还-遗失：领用单 ${borrowing.borrowing_no}${return_remark ? ' - ' + return_remark : ''}`;
+      }
+
+      addTimelineInTx(sample.id, timelineAction, null, newLocationId, null, timelineRemark, operator);
+
+      addAuditLogInTx(req, sample_condition === '损坏' ? 'scrap' : (sample_condition === '遗失' ? 'outbound' : 'inbound'), 'sample', String(sample.id),
+        { status: beforeSample.status, current_location_id: beforeSample.current_location_id },
+        { status: newSampleStatus, current_location_id: newLocationId, location_code: returnLoc.code, sample_condition, borrowing_no: borrowing.borrowing_no },
+        `领用归还：样本${sample_condition}，领用单 ${borrowing.borrowing_no}`);
+
+      runInTx(`
+        UPDATE sample_borrowings
+        SET status = 'returned',
+            return_location_id = ?,
+            return_sample_condition = ?,
+            return_remark = ?,
+            returned_at = datetime('now','localtime'),
+            returned_by = ?,
+            returned_by_id = ?,
+            updated_at = datetime('now','localtime'),
+            remark = COALESCE(remark, '') || ?
+        WHERE id = ?
+      `, [return_location_id, sample_condition, return_remark || '',
+          operator, currentUser.id,
+          return_remark ? ` [归还] ${return_remark}` : '', id]);
+    });
+
+    addAuditLog(req, 'borrowing_return', 'sample_borrowing', String(id),
+      { borrowing_no: borrowing.borrowing_no, status: beforeStatus, sample_barcode: borrowing.sample_barcode },
+      { borrowing_no: borrowing.borrowing_no, status: 'returned', sample_condition, return_location_id },
+      `归还领用单 ${borrowing.borrowing_no}：样本 ${borrowing.sample_barcode}，状态=${sample_condition}`);
 
     res.json({ success: true });
   } catch (e) {

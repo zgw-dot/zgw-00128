@@ -280,6 +280,39 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sample_borrowings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      borrowing_no TEXT NOT NULL UNIQUE,
+      sample_id INTEGER NOT NULL,
+      sample_barcode TEXT NOT NULL,
+      borrower_name TEXT NOT NULL,
+      borrower_id INTEGER NOT NULL,
+      expected_return_date TEXT NOT NULL,
+      purpose TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      remark TEXT,
+      borrowed_at TEXT,
+      return_location_id INTEGER,
+      return_sample_condition TEXT,
+      return_remark TEXT,
+      returned_at TEXT,
+      returned_by TEXT,
+      returned_by_id INTEGER,
+      overdue_marked_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  try {
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_no ON sample_borrowings(borrowing_no)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_barcode ON sample_borrowings(sample_barcode)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_status ON sample_borrowings(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_borrower ON sample_borrowings(borrower_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_expected_return ON sample_borrowings(expected_return_date)`);
+  } catch(e) {}
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_sample_reservations_no ON sample_reservations(reservation_no)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_sample_reservations_batch ON sample_reservations(batch_no)`);
@@ -314,6 +347,11 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_import_results_batch ON sample_import_results(batch_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_inventory_config_key ON inventory_config(config_key)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_item_threshold_name ON item_threshold(item_name)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_no ON sample_borrowings(borrowing_no)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_barcode ON sample_borrowings(sample_barcode)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_status ON sample_borrowings(status)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_borrower ON sample_borrowings(borrower_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_expected_return ON sample_borrowings(expected_return_date)`);
   } catch(e) {}
 
   const zoneCount = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones')[0].values[0][0];
