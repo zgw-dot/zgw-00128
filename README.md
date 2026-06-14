@@ -22,6 +22,11 @@
 - **🏷️ 标签补打**: 管理员和库管员可给在库、待入库样本发起标签补打，填写原因和份数，生成可打印的标签预览
 - **⏱️ 防重复提交**: 同一样本1分钟内同一原因重复提交自动拦截，避免误点连打
 - **🔍 补打记录管理**: 支持按条码、批次筛选补打记录，可导出 CSV，审计日志和时间线永久留存
+- **📋 温控异常工单**: 温区不匹配、温控异常、已出库被扫等场景一键开单，指派、处理、关闭、驳回全流程
+- **🔒 工单权限隔离**: 管理员可指派/关闭，库管员只能处理自己温区权限内的工单
+- **🚫 三重拦截**: 跨温区工单、重复未关闭工单、已出库样本强行处置全部拦住
+- **📜 审计与持久化**: 关键动作写审计日志、入样本时间线，SQLite 落库重启不丢
+- **📤 工单导出**: 支持按状态、温区、批次筛选并导出 CSV
 
 ---
 
@@ -469,6 +474,13 @@ curl -b cookies.txt "http://localhost:3000/api/label-reprints/export/csv" ^
 | **报废后继续操作** | 先报废，再调用入库/转移/出库 | `样本已报废，无法操作` |
 | **温区不匹配入库** | 样本要求温区=冷冻，入库选冷藏库位 | `温区不匹配：样本应放冷冻，当前库位属冷藏` |
 | **库管员处理差异** | warehouse 登录调 resolve 接口 | `{ success: false, forbidden: true }` |
+| **已出库样本补打** | 对已出库样本调用补打接口 | `样本状态为已出库，不能补打标签` |
+| **已报废样本补打** | 对已报废样本调用补打接口 | `样本状态为已报废，不能补打标签` |
+| **库管员跨温区补打** | wh_cold（仅冷藏权限）给冷冻样本补打 | `无权限操作该温区的样本` |
+| **无会话补打** | 不带 cookie 调用补打接口 | `未登录或会话已失效` |
+| **重复提交补打** | 60秒内同一样本同一原因重复补打 | `同一样本60秒内使用相同原因重复提交，请确认是否需要补打`，返回 `duplicate_warning: true` |
+| **无会话查询补打记录** | 不带 cookie 查询补打记录 | `未登录或会话已失效` |
+| **无会话导出补打记录** | 不带 cookie 导出补打记录 | `未登录或会话已失效` |
 
 ---
 
@@ -568,6 +580,67 @@ CREATE INDEX IF NOT EXISTS idx_label_reprints_barcode ON sample_label_reprints(s
 CREATE INDEX IF NOT EXISTS idx_label_reprints_batch ON sample_label_reprints(batch_no);
 CREATE INDEX IF NOT EXISTS idx_label_reprints_operator ON sample_label_reprints(operator_id);
 CREATE INDEX IF NOT EXISTS idx_label_reprints_time ON sample_label_reprints(reprint_time);
+
+-- 温控异常工单主表
+CREATE TABLE IF NOT EXISTS temperature_workorders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workorder_no TEXT NOT NULL UNIQUE,   -- 工单号 WO+日期+序号
+  type TEXT NOT NULL,                   -- zone_mismatch/temp_exception/outbound_scanned
+  title TEXT NOT NULL,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'pending', -- pending/processing/closed/rejected
+  priority TEXT NOT NULL DEFAULT 'medium', -- low/medium/high
+  suggested_handler_id INTEGER,
+  suggested_handler_name TEXT,
+  assigned_to_id INTEGER,
+  assigned_to_name TEXT,
+  deadline TEXT,
+  source_type TEXT,                     -- 来源：sample_detail/inventory_discrepancy等
+  source_id INTEGER,
+  creator_id INTEGER NOT NULL,
+  creator_name TEXT NOT NULL,
+  handler_id INTEGER,
+  handler_name TEXT,
+  handle_result TEXT,
+  handle_remark TEXT,
+  handled_at TEXT,
+  closed_at TEXT,
+  reject_reason TEXT,
+  rejected_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- 工单索引
+CREATE INDEX IF NOT EXISTS idx_workorders_no ON temperature_workorders(workorder_no);
+CREATE INDEX IF NOT EXISTS idx_workorders_status ON temperature_workorders(status);
+CREATE INDEX IF NOT EXISTS idx_workorders_type ON temperature_workorders(type);
+CREATE INDEX IF NOT EXISTS idx_workorders_assigned ON temperature_workorders(assigned_to_id);
+CREATE INDEX IF NOT EXISTS idx_workorders_creator ON temperature_workorders(creator_id);
+CREATE INDEX IF NOT EXISTS idx_workorders_created ON temperature_workorders(created_at);
+
+-- 工单样本关联表
+CREATE TABLE IF NOT EXISTS workorder_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workorder_id INTEGER NOT NULL,
+  sample_id INTEGER NOT NULL,
+  sample_barcode TEXT NOT NULL,
+  sample_name TEXT,
+  batch_no TEXT,
+  zone_id INTEGER,
+  zone_name TEXT,
+  location_id INTEGER,
+  location_code TEXT,
+  sample_status TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- 工单样本索引
+CREATE INDEX IF NOT EXISTS idx_workorder_samples_workorder ON workorder_samples(workorder_id);
+CREATE INDEX IF NOT EXISTS idx_workorder_samples_sample ON workorder_samples(sample_id);
+CREATE INDEX IF NOT EXISTS idx_workorder_samples_barcode ON workorder_samples(sample_barcode);
+CREATE INDEX IF NOT EXISTS idx_workorder_samples_batch ON workorder_samples(batch_no);
+CREATE INDEX IF NOT EXISTS idx_workorder_samples_zone ON workorder_samples(zone_id);
 ```
 
 **预置绑定**：

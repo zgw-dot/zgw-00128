@@ -1,0 +1,25 @@
+{
+  "runId": "mqdvn0ge093",
+  "createdAt": "2026-06-14T14:25:52.910Z",
+  "barcodes": {
+    "W1": "WO-mqdvn0ge093-W1",
+    "W2": "WO-mqdvn0ge093-W2",
+    "W3": "WO-mqdvn0ge093-W3",
+    "W4": "WO-mqdvn0ge093-W4",
+    "W5": "WO-mqdvn0ge093-W5"
+  },
+  "batch": "BATCH-WO-mqdvn0ge093",
+  "sampleIds": {
+    "WO-mqdvn0ge093-W1": 17,
+    "WO-mqdvn0ge093-W2": 18,
+    "WO-mqdvn0ge093-W3": 19,
+    "WO-mqdvn0ge093-W4": 20,
+    "WO-mqdvn0ge093-W5": 21
+  },
+  "workorderIds": {
+    "wo1": 9,
+    "woReject": 10,
+    "woOutbound": 11,
+    "woOther": 12
+  }
+}

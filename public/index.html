@@ -159,6 +159,7 @@ select.batch-select{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;
       <button class="nav-btn active" onclick="switchPage('dashboard')">台账概览</button>
       <button class="nav-btn" onclick="switchPage('samples')">样本管理</button>
       <button class="nav-btn" onclick="switchPage('inventory')">盘点管理</button>
+      <button class="nav-btn" onclick="switchPage('workorders')">异常工单</button>
       <button class="nav-btn" onclick="switchPage('history')">历史查询</button>
       <button class="nav-btn" onclick="switchPage('label-reprints')">标签补打</button>
       <button class="nav-btn" onclick="switchPage('config')">库位配置</button>
@@ -374,6 +375,90 @@ select.batch-select{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;
     </div>
   </div>
 
+  <div id="page-workorders" class="page">
+    <div class="card">
+      <div class="card-title">
+        <span>⚠️ 温控异常工单</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="exportWorkordersCSV()">📤 导出CSV</button>
+          <button class="btn btn-primary btn-sm" onclick="showCreateWorkorderModal()">➕ 新建工单</button>
+        </div>
+      </div>
+      <div class="search-bar">
+        <input type="text" id="wo-keyword" placeholder="搜索工单号/标题..." oninput="loadWorkorders()">
+        <select id="wo-status" onchange="loadWorkorders()">
+          <option value="">全部状态</option>
+          <option value="pending">待处理</option>
+          <option value="processing">处理中</option>
+          <option value="closed">已关闭</option>
+          <option value="rejected">已驳回</option>
+        </select>
+        <select id="wo-type" onchange="loadWorkorders()">
+          <option value="">全部类型</option>
+          <option value="zone_mismatch">温区不匹配</option>
+          <option value="temp_exception">温控异常</option>
+          <option value="outbound_scanned">已出库被扫</option>
+        </select>
+        <input type="text" id="wo-batch" placeholder="按批次筛选..." oninput="loadWorkorders()">
+        <button class="btn btn-secondary btn-sm" onclick="loadWorkorders()">🔍 查询</button>
+      </div>
+      <table id="workorders-table">
+        <thead><tr><th>工单号</th><th>类型</th><th>标题</th><th>状态</th><th>优先级</th><th>创建人</th><th>指派给</th><th>截止时间</th><th>创建时间</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="wo-pagination" style="margin-top:16px;text-align:center;"></div>
+    </div>
+  </div>
+
+  <div id="page-workorder-detail" class="page">
+    <div class="card">
+      <div class="detail-header">
+        <div>
+          <h2 id="wo-detail-no" style="margin-bottom:8px;">工单号</h2>
+          <div id="wo-detail-type" style="color:#6b7280;">类型</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" onclick="switchPage('workorders')">← 返回列表</button>
+          <button class="btn btn-primary btn-sm" id="wo-btn-assign" onclick="showAssignWorkorderModal()">指派</button>
+          <button class="btn btn-success btn-sm" id="wo-btn-process" onclick="showProcessWorkorderModal()">处理</button>
+          <button class="btn btn-success btn-sm" id="wo-btn-close" onclick="showCloseWorkorderModal()">关闭</button>
+          <button class="btn btn-danger btn-sm" id="wo-btn-reject" onclick="showRejectWorkorderModal()">驳回</button>
+        </div>
+      </div>
+      <div class="detail-grid">
+        <div><div class="detail-label">状态</div><div id="wo-detail-status">-</div></div>
+        <div><div class="detail-label">优先级</div><div id="wo-detail-priority">-</div></div>
+        <div><div class="detail-label">创建人</div><div id="wo-detail-creator">-</div></div>
+        <div><div class="detail-label">指派给</div><div id="wo-detail-assigned">-</div></div>
+        <div><div class="detail-label">截止时间</div><div id="wo-detail-deadline">-</div></div>
+        <div><div class="detail-label">创建时间</div><div id="wo-detail-created">-</div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-title">📝 工单描述</div>
+        <div id="wo-detail-desc" style="padding:12px;background:#f9fafb;border-radius:6px;min-height:60px;"></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-title">📦 关联样本</div>
+        <table id="wo-samples-table">
+          <thead><tr><th>条码</th><th>批次号</th><th>样本名称</th><th>温区</th><th>库位</th><th>样本状态</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-title">📋 处理记录</div>
+        <div id="wo-handle-info" style="padding:12px;background:#f9fafb;border-radius:6px;">
+          <div id="wo-handle-empty" class="empty-state">暂无处理记录</div>
+          <div id="wo-handle-content" style="display:none;">
+            <p><strong>处理人：</strong><span id="wo-handler">-</span></p>
+            <p><strong>处理结果：</strong><span id="wo-handle-result">-</span></p>
+            <p><strong>处理备注：</strong><span id="wo-handle-remark">-</span></p>
+            <p><strong>处理时间：</strong><span id="wo-handled-at">-</span></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <div class="modal-backdrop" id="modal-backdrop">
@@ -408,15 +493,18 @@ function api(path, options = {}) {
 function switchPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  const pageId = name === 'detail' ? 'page-detail' : 'page-' + name;
+  const pageId = name === 'detail' ? 'page-detail' :
+                 name === 'workorder-detail' ? 'page-workorder-detail' :
+                 'page-' + name;
   document.getElementById(pageId).classList.add('active');
-  const btnMap = { dashboard: 0, samples: 1, inventory: 2, history: 3, 'label-reprints': 4, config: 5 };
+  const btnMap = { dashboard: 0, samples: 1, inventory: 2, workorders: 3, history: 4, 'label-reprints': 5, config: 6 };
   if (btnMap[name] !== undefined) {
     document.querySelectorAll('.nav-btn')[btnMap[name]].classList.add('active');
   }
   if (name === 'dashboard') loadDashboard();
   if (name === 'samples') loadSamples();
   if (name === 'inventory') loadInventory();
+  if (name === 'workorders') loadWorkorders();
   if (name === 'label-reprints') loadLabelReprints();
   if (name === 'config') { loadZones(); loadLocations(); }
 }
@@ -876,6 +964,361 @@ function exportLabelReprintsCSV() {
   const batch_no = document.getElementById('lr-batch') ? document.getElementById('lr-batch').value : '';
   const params = new URLSearchParams({ barcode, batch_no }).toString();
   window.location.href = '/api/label-reprints/export/csv?' + params;
+}
+
+let currentWorkorderId = null;
+let currentWorkordersPage = 1;
+
+function loadWorkorders() {
+  const keyword = document.getElementById('wo-keyword') ? document.getElementById('wo-keyword').value : '';
+  const status = document.getElementById('wo-status') ? document.getElementById('wo-status').value : '';
+  const type = document.getElementById('wo-type') ? document.getElementById('wo-type').value : '';
+  const batch_no = document.getElementById('wo-batch') ? document.getElementById('wo-batch').value : '';
+
+  const params = new URLSearchParams({
+    keyword, status, type, batch_no,
+    page: currentWorkordersPage,
+    page_size: 20
+  }).toString();
+
+  api('/api/workorders?' + params).then(res => {
+    if (!res.success) return;
+    const tbody = document.querySelector('#workorders-table tbody');
+    const { list, total, page, page_size } = res.data;
+
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无工单</td></tr>';
+    } else {
+      const typeMap = { zone_mismatch: '温区不匹配', temp_exception: '温控异常', outbound_scanned: '已出库被扫' };
+      const statusMap = { pending: '待处理', processing: '处理中', closed: '已关闭', rejected: '已驳回' };
+      const statusClass = {
+        pending: 'badge-warning',
+        processing: 'badge-primary',
+        closed: 'badge-success',
+        rejected: 'badge-danger'
+      };
+      const priorityMap = { low: '低', medium: '中', high: '高' };
+
+      tbody.innerHTML = list.map(w => `
+        <tr>
+          <td><strong>${w.workorder_no}</strong></td>
+          <td>${typeMap[w.type] || w.type}</td>
+          <td>${w.title}</td>
+          <td><span class="badge ${statusClass[w.status] || ''}">${statusMap[w.status] || w.status}</span></td>
+          <td>${priorityMap[w.priority] || w.priority}</td>
+          <td>${w.creator_name || '-'}</td>
+          <td>${w.assigned_to_name || '-'}</td>
+          <td>${w.deadline || '-'}</td>
+          <td>${w.created_at}</td>
+          <td>
+            <button class="btn btn-sm btn-secondary" onclick="viewWorkorderDetail(${w.id})">详情</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    const totalPages = Math.ceil(total / page_size);
+    const paginationEl = document.getElementById('wo-pagination');
+    if (paginationEl) {
+      let paginationHtml = `<span style="margin-right:16px;">共 ${total} 条，第 ${page}/${totalPages} 页</span>`;
+      if (page > 1) {
+        paginationHtml += `<button class="btn btn-sm btn-secondary" onclick="currentWorkordersPage=${page - 1};loadWorkorders();">上一页</button>`;
+      }
+      if (page < totalPages) {
+        paginationHtml += `<button class="btn btn-sm btn-secondary" onclick="currentWorkordersPage=${page + 1};loadWorkorders();" style="margin-left:8px;">下一页</button>`;
+      }
+      paginationEl.innerHTML = paginationHtml;
+    }
+  });
+}
+
+function viewWorkorderDetail(id) {
+  currentWorkorderId = id;
+  switchPage('workorder-detail');
+  loadWorkorderDetail();
+}
+
+function loadWorkorderDetail() {
+  if (!currentWorkorderId) return;
+
+  api('/api/workorders/' + currentWorkorderId).then(res => {
+    if (!res.success) {
+      alertMsg(res.error || '加载失败', 'error');
+      return;
+    }
+    const wo = res.data;
+
+    const typeMap = { zone_mismatch: '温区不匹配', temp_exception: '温控异常', outbound_scanned: '已出库被扫' };
+    const statusMap = { pending: '待处理', processing: '处理中', closed: '已关闭', rejected: '已驳回' };
+    const priorityMap = { low: '低', medium: '中', high: '高' };
+
+    document.getElementById('wo-detail-no').textContent = wo.workorder_no;
+    document.getElementById('wo-detail-type').textContent = typeMap[wo.type] || wo.type;
+    document.getElementById('wo-detail-status').textContent = statusMap[wo.status] || wo.status;
+    document.getElementById('wo-detail-priority').textContent = priorityMap[wo.priority] || wo.priority;
+    document.getElementById('wo-detail-creator').textContent = wo.creator_name || '-';
+    document.getElementById('wo-detail-assigned').textContent = wo.assigned_to_name || '-';
+    document.getElementById('wo-detail-deadline').textContent = wo.deadline || '-';
+    document.getElementById('wo-detail-created').textContent = wo.created_at;
+    document.getElementById('wo-detail-desc').textContent = wo.description || '-';
+
+    const samplesTbody = document.querySelector('#wo-samples-table tbody');
+    if (wo.samples && wo.samples.length > 0) {
+      samplesTbody.innerHTML = wo.samples.map(s => `
+        <tr>
+          <td><strong>${s.sample_barcode}</strong></td>
+          <td>${s.batch_no || '-'}</td>
+          <td>${s.sample_name || '-'}</td>
+          <td>${s.zone_name || '-'}</td>
+          <td>${s.location_code || '-'}</td>
+          <td>${s.sample_status || '-'}</td>
+        </tr>
+      `).join('');
+    } else {
+      samplesTbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无关联样本</td></tr>';
+    }
+
+    if (wo.handler_name || wo.handle_result) {
+      document.getElementById('wo-handle-empty').style.display = 'none';
+      document.getElementById('wo-handle-content').style.display = 'block';
+      document.getElementById('wo-handler').textContent = wo.handler_name || '-';
+      document.getElementById('wo-handle-result').textContent = wo.handle_result || '-';
+      document.getElementById('wo-handle-remark').textContent = wo.handle_remark || '-';
+      document.getElementById('wo-handled-at').textContent = wo.handled_at || '-';
+    } else {
+      document.getElementById('wo-handle-empty').style.display = 'block';
+      document.getElementById('wo-handle-content').style.display = 'none';
+    }
+
+    const isAdmin = currentUser && currentUser.role === 'admin';
+    const isAssigned = currentUser && wo.assigned_to_id === currentUser.id;
+    const canEdit = wo.status !== 'closed' && wo.status !== 'rejected';
+
+    document.getElementById('wo-btn-assign').style.display = (isAdmin && canEdit) ? '' : 'none';
+    document.getElementById('wo-btn-close').style.display = (isAdmin && canEdit) ? '' : 'none';
+    document.getElementById('wo-btn-reject').style.display = (isAdmin && canEdit) ? '' : 'none';
+    document.getElementById('wo-btn-process').style.display =
+      (canEdit && (isAdmin || isAssigned) && wo.status === 'processing') ? '' : 'none';
+  });
+}
+
+function showCreateWorkorderModal() {
+  api('/api/samples').then(res => {
+    if (!res.success) return;
+    const samples = res.data;
+    showModal(`
+      <h3>创建温控异常工单</h3>
+      <div class="form-group"><label>异常类型 *</label>
+        <select id="wo-create-type">
+          <option value="zone_mismatch">温区不匹配</option>
+          <option value="temp_exception">温控异常</option>
+          <option value="outbound_scanned">已出库样本被扫</option>
+        </select>
+      </div>
+      <div class="form-group"><label>标题 *</label><input id="wo-create-title" placeholder="请输入工单标题"></div>
+      <div class="form-group"><label>描述</label><textarea id="wo-create-desc" placeholder="请详细描述异常情况"></textarea></div>
+      <div class="form-group"><label>优先级</label>
+        <select id="wo-create-priority">
+          <option value="low">低</option>
+          <option value="medium" selected>中</option>
+          <option value="high">高</option>
+        </select>
+      </div>
+      <div class="form-group"><label>建议处理人</label><input id="wo-create-handler" placeholder="输入处理人姓名"></div>
+      <div class="form-group"><label>截止时间</label><input type="date" id="wo-create-deadline"></div>
+      <div class="form-group"><label>选择样本 *</label>
+        <div style="max-height:200px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px;padding:8px;">
+          ${samples.length === 0 ? '<div class="empty-state">暂无可选样本</div>' : samples.map(s => `
+            <label style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+              <input type="checkbox" class="wo-create-sample" value="${s.id}">
+              <span>${s.barcode} - ${s.name || '未命名'} (${s.status_label})</span>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="doCreateWorkorder()">创建工单</button>
+      </div>
+    `);
+  });
+}
+
+function doCreateWorkorder() {
+  const type = document.getElementById('wo-create-type').value;
+  const title = document.getElementById('wo-create-title').value.trim();
+  const description = document.getElementById('wo-create-desc').value.trim();
+  const priority = document.getElementById('wo-create-priority').value;
+  const suggested_handler_name = document.getElementById('wo-create-handler').value.trim();
+  const deadline = document.getElementById('wo-create-deadline').value;
+
+  const sampleChecks = document.querySelectorAll('.wo-create-sample:checked');
+  const sample_ids = Array.from(sampleChecks).map(c => parseInt(c.value));
+
+  if (!title) { alertMsg('请输入标题', 'error'); return; }
+  if (sample_ids.length === 0) { alertMsg('请至少选择一个样本', 'error'); return; }
+
+  api('/api/workorders', {
+    method: 'POST',
+    body: {
+      type, title, description, priority,
+      suggested_handler_name,
+      deadline: deadline || null,
+      sample_ids
+    }
+  }).then(res => {
+    if (res.success) {
+      alertMsg('工单创建成功');
+      closeModal();
+      loadWorkorders();
+    } else {
+      alertMsg(res.error || '创建失败', 'error');
+    }
+  });
+}
+
+function showAssignWorkorderModal() {
+  api('/api/users').then(res => {
+    if (!res.success) return;
+    const users = res.data.filter(u => u.role === 'warehouse' || u.role === 'admin');
+    showModal(`
+      <h3>指派工单</h3>
+      <div class="form-group"><label>选择处理人 *</label>
+        <select id="wo-assign-user">
+          <option value="">请选择处理人</option>
+          ${users.map(u => `<option value="${u.id}">${u.real_name || u.username} (${u.role_label})</option>`).join('')}
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="doAssignWorkorder()">确认指派</button>
+      </div>
+    `);
+  });
+}
+
+function doAssignWorkorder() {
+  const assigned_to_id = parseInt(document.getElementById('wo-assign-user').value);
+  const assigned_to_name = document.getElementById('wo-assign-user').selectedOptions[0].text;
+
+  if (!assigned_to_id) { alertMsg('请选择处理人', 'error'); return; }
+
+  api(`/api/workorders/${currentWorkorderId}/assign`, {
+    method: 'POST',
+    body: { assigned_to_id, assigned_to_name }
+  }).then(res => {
+    if (res.success) {
+      alertMsg('指派成功');
+      closeModal();
+      loadWorkorderDetail();
+      loadWorkorders();
+    } else {
+      alertMsg(res.error || '指派失败', 'error');
+    }
+  });
+}
+
+function showProcessWorkorderModal() {
+  showModal(`
+    <h3>处理工单</h3>
+    <div class="form-group"><label>处理结果 *</label><input id="wo-process-result" placeholder="请输入处理结果"></div>
+    <div class="form-group"><label>处理备注</label><textarea id="wo-process-remark" placeholder="请输入详细处理说明"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-success" onclick="doProcessWorkorder()">提交处理</button>
+    </div>
+  `);
+}
+
+function doProcessWorkorder() {
+  const handle_result = document.getElementById('wo-process-result').value.trim();
+  const handle_remark = document.getElementById('wo-process-remark').value.trim();
+
+  if (!handle_result) { alertMsg('请输入处理结果', 'error'); return; }
+
+  api(`/api/workorders/${currentWorkorderId}/process`, {
+    method: 'POST',
+    body: { handle_result, handle_remark }
+  }).then(res => {
+    if (res.success) {
+      alertMsg('处理已提交');
+      closeModal();
+      loadWorkorderDetail();
+      loadWorkorders();
+    } else {
+      alertMsg(res.error || '提交失败', 'error');
+    }
+  });
+}
+
+function showCloseWorkorderModal() {
+  showModal(`
+    <h3>关闭工单</h3>
+    <div class="form-group"><label>关闭备注</label><textarea id="wo-close-remark" placeholder="请输入关闭说明（可选）"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-success" onclick="doCloseWorkorder()">确认关闭</button>
+    </div>
+  `);
+}
+
+function doCloseWorkorder() {
+  const close_remark = document.getElementById('wo-close-remark').value.trim();
+
+  api(`/api/workorders/${currentWorkorderId}/close`, {
+    method: 'POST',
+    body: { close_remark }
+  }).then(res => {
+    if (res.success) {
+      alertMsg('工单已关闭');
+      closeModal();
+      loadWorkorderDetail();
+      loadWorkorders();
+    } else {
+      alertMsg(res.error || '关闭失败', 'error');
+    }
+  });
+}
+
+function showRejectWorkorderModal() {
+  showModal(`
+    <h3>驳回工单</h3>
+    <div class="form-group"><label>驳回原因 *</label><textarea id="wo-reject-reason" placeholder="请填写驳回原因"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-danger" onclick="doRejectWorkorder()">确认驳回</button>
+    </div>
+  `);
+}
+
+function doRejectWorkorder() {
+  const reject_reason = document.getElementById('wo-reject-reason').value.trim();
+
+  if (!reject_reason) { alertMsg('请填写驳回原因', 'error'); return; }
+
+  api(`/api/workorders/${currentWorkorderId}/reject`, {
+    method: 'POST',
+    body: { reject_reason }
+  }).then(res => {
+    if (res.success) {
+      alertMsg('工单已驳回');
+      closeModal();
+      loadWorkorderDetail();
+      loadWorkorders();
+    } else {
+      alertMsg(res.error || '驳回失败', 'error');
+    }
+  });
+}
+
+function exportWorkordersCSV() {
+  const keyword = document.getElementById('wo-keyword') ? document.getElementById('wo-keyword').value : '';
+  const status = document.getElementById('wo-status') ? document.getElementById('wo-status').value : '';
+  const type = document.getElementById('wo-type') ? document.getElementById('wo-type').value : '';
+  const batch_no = document.getElementById('wo-batch') ? document.getElementById('wo-batch').value : '';
+
+  const params = new URLSearchParams({ keyword, status, type, batch_no }).toString();
+  window.location.href = '/api/workorders/export/csv?' + params;
 }
 
 function showInboundModal() {

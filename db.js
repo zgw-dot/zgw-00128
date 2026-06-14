@@ -326,6 +326,54 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS temperature_workorders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workorder_no TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      priority TEXT NOT NULL DEFAULT 'medium',
+      suggested_handler_id INTEGER,
+      suggested_handler_name TEXT,
+      assigned_to_id INTEGER,
+      assigned_to_name TEXT,
+      deadline TEXT,
+      source_type TEXT,
+      source_id INTEGER,
+      creator_id INTEGER,
+      creator_name TEXT,
+      handler_id INTEGER,
+      handler_name TEXT,
+      handle_result TEXT,
+      handle_remark TEXT,
+      handled_at TEXT,
+      closed_at TEXT,
+      reject_reason TEXT,
+      rejected_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS workorder_samples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workorder_id INTEGER NOT NULL,
+      sample_id INTEGER,
+      sample_barcode TEXT NOT NULL,
+      sample_name TEXT,
+      batch_no TEXT,
+      zone_id INTEGER,
+      zone_name TEXT,
+      location_id INTEGER,
+      location_code TEXT,
+      sample_status TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )
+  `);
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_no ON sample_borrowings(borrowing_no)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_barcode ON sample_borrowings(sample_barcode)`);
@@ -381,6 +429,20 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_batch ON sample_label_reprints(batch_no)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_operator ON sample_label_reprints(operator_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_time ON sample_label_reprints(reprint_time)`);
+  } catch(e) {}
+
+  try {
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorders_no ON temperature_workorders(workorder_no)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorders_status ON temperature_workorders(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorders_type ON temperature_workorders(type)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorders_assigned ON temperature_workorders(assigned_to_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorders_creator ON temperature_workorders(creator_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorders_created ON temperature_workorders(created_at)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorder_samples_workorder ON workorder_samples(workorder_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorder_samples_sample ON workorder_samples(sample_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorder_samples_barcode ON workorder_samples(sample_barcode)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorder_samples_batch ON workorder_samples(batch_no)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_workorder_samples_zone ON workorder_samples(zone_id)`);
   } catch(e) {}
 
   const zoneResult = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones');
@@ -724,6 +786,364 @@ function getLabelReprintsCount(filters = {}) {
   return row ? row.cnt : 0;
 }
 
+function generateWorkorderNo() {
+  const now = new Date();
+  const dateStr = now.getFullYear().toString() +
+    (now.getMonth() + 1).toString().padStart(2, '0') +
+    now.getDate().toString().padStart(2, '0');
+  const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  return `WO${dateStr}${random}`;
+}
+
+function createWorkorder(params) {
+  const {
+    type, title, description, priority,
+    suggested_handler_id, suggested_handler_name,
+    deadline, source_type, source_id,
+    creator_id, creator_name
+  } = params;
+  const workorder_no = generateWorkorderNo();
+  return run(`
+    INSERT INTO temperature_workorders
+    (workorder_no, type, title, description, status, priority,
+     suggested_handler_id, suggested_handler_name,
+     deadline, source_type, source_id, creator_id, creator_name)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    workorder_no, type, title, description || '', priority || 'medium',
+    suggested_handler_id || null, suggested_handler_name || null,
+    deadline || null, source_type || null, source_id || null,
+    creator_id || null, creator_name || null
+  ]);
+}
+
+function createWorkorderInTx(params) {
+  const {
+    type, title, description, priority,
+    suggested_handler_id, suggested_handler_name,
+    deadline, source_type, source_id,
+    creator_id, creator_name
+  } = params;
+  const workorder_no = generateWorkorderNo();
+  return runInTx(`
+    INSERT INTO temperature_workorders
+    (workorder_no, type, title, description, status, priority,
+     suggested_handler_id, suggested_handler_name,
+     deadline, source_type, source_id, creator_id, creator_name)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    workorder_no, type, title, description || '', priority || 'medium',
+    suggested_handler_id || null, suggested_handler_name || null,
+    deadline || null, source_type || null, source_id || null,
+    creator_id || null, creator_name || null
+  ]);
+}
+
+function addWorkorderSample(workorderId, sampleInfo) {
+  const {
+    sample_id, sample_barcode, sample_name, batch_no,
+    zone_id, zone_name, location_id, location_code, sample_status
+  } = sampleInfo;
+  return run(`
+    INSERT INTO workorder_samples
+    (workorder_id, sample_id, sample_barcode, sample_name, batch_no,
+     zone_id, zone_name, location_id, location_code, sample_status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    workorderId, sample_id || null, sample_barcode, sample_name || null, batch_no || null,
+    zone_id || null, zone_name || null, location_id || null, location_code || null, sample_status || null
+  ]);
+}
+
+function addWorkorderSampleInTx(workorderId, sampleInfo) {
+  const {
+    sample_id, sample_barcode, sample_name, batch_no,
+    zone_id, zone_name, location_id, location_code, sample_status
+  } = sampleInfo;
+  return runInTx(`
+    INSERT INTO workorder_samples
+    (workorder_id, sample_id, sample_barcode, sample_name, batch_no,
+     zone_id, zone_name, location_id, location_code, sample_status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    workorderId, sample_id || null, sample_barcode, sample_name || null, batch_no || null,
+    zone_id || null, zone_name || null, location_id || null, location_code || null, sample_status || null
+  ]);
+}
+
+function getWorkorderById(id) {
+  return queryOne(`
+    SELECT * FROM temperature_workorders WHERE id = ?
+  `, [id]);
+}
+
+function getWorkorderByNo(workorderNo) {
+  return queryOne(`
+    SELECT * FROM temperature_workorders WHERE workorder_no = ?
+  `, [workorderNo]);
+}
+
+function getWorkorderSamples(workorderId) {
+  return queryAll(`
+    SELECT * FROM workorder_samples WHERE workorder_id = ? ORDER BY id
+  `, [workorderId]);
+}
+
+function getWorkorders(filters = {}) {
+  let sql = `SELECT tw.* FROM temperature_workorders tw WHERE 1=1`;
+  const params = [];
+
+  if (filters.status) {
+    sql += ' AND tw.status = ?';
+    params.push(filters.status);
+  }
+  if (filters.type) {
+    sql += ' AND tw.type = ?';
+    params.push(filters.type);
+  }
+  if (filters.keyword) {
+    sql += ' AND (tw.workorder_no LIKE ? OR tw.title LIKE ? OR tw.description LIKE ?)';
+    params.push(`%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`);
+  }
+  if (filters.assigned_to_id) {
+    sql += ' AND tw.assigned_to_id = ?';
+    params.push(filters.assigned_to_id);
+  }
+  if (filters.creator_id) {
+    sql += ' AND tw.creator_id = ?';
+    params.push(filters.creator_id);
+  }
+
+  if (filters.zone_id || filters.batch_no || filters.barcode || filters.accessible_zones !== undefined) {
+    sql += ` AND EXISTS (
+      SELECT 1 FROM workorder_samples ws
+      WHERE ws.workorder_id = tw.id
+    `;
+    if (filters.zone_id) {
+      sql += ' AND ws.zone_id = ?';
+      params.push(filters.zone_id);
+    }
+    if (filters.batch_no) {
+      sql += ' AND ws.batch_no LIKE ?';
+      params.push(`%${filters.batch_no}%`);
+    }
+    if (filters.barcode) {
+      sql += ' AND ws.sample_barcode LIKE ?';
+      params.push(`%${filters.barcode}%`);
+    }
+    if (filters.accessible_zones !== undefined && filters.accessible_zones !== null) {
+      if (filters.accessible_zones.length === 0) {
+        sql += ' AND 1=0';
+      } else {
+        sql += ' AND ws.zone_id IN (' + filters.accessible_zones.map(() => '?').join(',') + ')';
+        params.push(...filters.accessible_zones);
+      }
+    }
+    sql += ')';
+  }
+
+  sql += ' ORDER BY tw.id DESC';
+
+  if (filters.page_size && filters.page) {
+    sql += ' LIMIT ? OFFSET ?';
+    params.push(parseInt(filters.page_size), (parseInt(filters.page) - 1) * parseInt(filters.page_size));
+  }
+
+  return queryAll(sql, params);
+}
+
+function getWorkordersCount(filters = {}) {
+  let sql = 'SELECT COUNT(*) as cnt FROM temperature_workorders tw WHERE 1=1';
+  const params = [];
+
+  if (filters.status) {
+    sql += ' AND tw.status = ?';
+    params.push(filters.status);
+  }
+  if (filters.type) {
+    sql += ' AND tw.type = ?';
+    params.push(filters.type);
+  }
+  if (filters.keyword) {
+    sql += ' AND (tw.workorder_no LIKE ? OR tw.title LIKE ? OR tw.description LIKE ?)';
+    params.push(`%${filters.keyword}%`, `%${filters.keyword}%`, `%${filters.keyword}%`);
+  }
+  if (filters.assigned_to_id) {
+    sql += ' AND tw.assigned_to_id = ?';
+    params.push(filters.assigned_to_id);
+  }
+  if (filters.creator_id) {
+    sql += ' AND tw.creator_id = ?';
+    params.push(filters.creator_id);
+  }
+
+  if (filters.zone_id || filters.batch_no || filters.barcode || filters.accessible_zones !== undefined) {
+    sql += ` AND EXISTS (
+      SELECT 1 FROM workorder_samples ws
+      WHERE ws.workorder_id = tw.id
+    `;
+    if (filters.zone_id) {
+      sql += ' AND ws.zone_id = ?';
+      params.push(filters.zone_id);
+    }
+    if (filters.batch_no) {
+      sql += ' AND ws.batch_no LIKE ?';
+      params.push(`%${filters.batch_no}%`);
+    }
+    if (filters.barcode) {
+      sql += ' AND ws.sample_barcode LIKE ?';
+      params.push(`%${filters.barcode}%`);
+    }
+    if (filters.accessible_zones !== undefined && filters.accessible_zones !== null) {
+      if (filters.accessible_zones.length === 0) {
+        sql += ' AND 1=0';
+      } else {
+        sql += ' AND ws.zone_id IN (' + filters.accessible_zones.map(() => '?').join(',') + ')';
+        params.push(...filters.accessible_zones);
+      }
+    }
+    sql += ')';
+  }
+
+  const row = queryOne(sql, params);
+  return row ? row.cnt : 0;
+}
+
+function assignWorkorder(workorderId, assignedToId, assignedToName) {
+  return run(`
+    UPDATE temperature_workorders SET
+      assigned_to_id = ?,
+      assigned_to_name = ?,
+      status = 'processing',
+      updated_at = datetime('now','localtime')
+    WHERE id = ?
+  `, [assignedToId, assignedToName, workorderId]);
+}
+
+function assignWorkorderInTx(workorderId, assignedToId, assignedToName) {
+  return runInTx(`
+    UPDATE temperature_workorders SET
+      assigned_to_id = ?,
+      assigned_to_name = ?,
+      status = 'processing',
+      updated_at = datetime('now','localtime')
+    WHERE id = ?
+  `, [assignedToId, assignedToName, workorderId]);
+}
+
+function updateWorkorderStatus(workorderId, status, extra = {}) {
+  let sql = `UPDATE temperature_workorders SET status = ?, updated_at = datetime('now','localtime')`;
+  const params = [status];
+
+  if (extra.handler_id) {
+    sql += ', handler_id = ?';
+    params.push(extra.handler_id);
+  }
+  if (extra.handler_name) {
+    sql += ', handler_name = ?';
+    params.push(extra.handler_name);
+  }
+  if (extra.handle_result) {
+    sql += ', handle_result = ?';
+    params.push(extra.handle_result);
+  }
+  if (extra.handle_remark) {
+    sql += ', handle_remark = ?';
+    params.push(extra.handle_remark);
+  }
+  if (extra.handled_at) {
+    sql += ', handled_at = ?';
+    params.push(extra.handled_at);
+  }
+  if (extra.closed_at) {
+    sql += ', closed_at = ?';
+    params.push(extra.closed_at);
+  }
+  if (extra.reject_reason) {
+    sql += ', reject_reason = ?';
+    params.push(extra.reject_reason);
+  }
+  if (extra.rejected_at) {
+    sql += ', rejected_at = ?';
+    params.push(extra.rejected_at);
+  }
+
+  sql += ' WHERE id = ?';
+  params.push(workorderId);
+
+  return run(sql, params);
+}
+
+function updateWorkorderStatusInTx(workorderId, status, extra = {}) {
+  let sql = `UPDATE temperature_workorders SET status = ?, updated_at = datetime('now','localtime')`;
+  const params = [status];
+
+  if (extra.handler_id) {
+    sql += ', handler_id = ?';
+    params.push(extra.handler_id);
+  }
+  if (extra.handler_name) {
+    sql += ', handler_name = ?';
+    params.push(extra.handler_name);
+  }
+  if (extra.handle_result) {
+    sql += ', handle_result = ?';
+    params.push(extra.handle_result);
+  }
+  if (extra.handle_remark) {
+    sql += ', handle_remark = ?';
+    params.push(extra.handle_remark);
+  }
+  if (extra.handled_at) {
+    sql += ', handled_at = ?';
+    params.push(extra.handled_at);
+  }
+  if (extra.closed_at) {
+    sql += ', closed_at = ?';
+    params.push(extra.closed_at);
+  }
+  if (extra.reject_reason) {
+    sql += ', reject_reason = ?';
+    params.push(extra.reject_reason);
+  }
+  if (extra.rejected_at) {
+    sql += ', rejected_at = ?';
+    params.push(extra.rejected_at);
+  }
+
+  sql += ' WHERE id = ?';
+  params.push(workorderId);
+
+  return runInTx(sql, params);
+}
+
+function checkOpenWorkorderForSample(sampleId) {
+  return queryOne(`
+    SELECT tw.* FROM temperature_workorders tw
+    INNER JOIN workorder_samples ws ON ws.workorder_id = tw.id
+    WHERE ws.sample_id = ? AND tw.status IN ('pending', 'processing')
+    ORDER BY tw.id DESC LIMIT 1
+  `, [sampleId]);
+}
+
+function checkOpenWorkorderForSampleInTx(sampleId) {
+  return queryOne(`
+    SELECT tw.* FROM temperature_workorders tw
+    INNER JOIN workorder_samples ws ON ws.workorder_id = tw.id
+    WHERE ws.sample_id = ? AND tw.status IN ('pending', 'processing')
+    ORDER BY tw.id DESC LIMIT 1
+  `, [sampleId]);
+}
+
+function getWorkordersBySampleId(sampleId) {
+  return queryAll(`
+    SELECT tw.* FROM temperature_workorders tw
+    INNER JOIN workorder_samples ws ON ws.workorder_id = tw.id
+    WHERE ws.sample_id = ?
+    ORDER BY tw.id DESC
+  `, [sampleId]);
+}
+
 function closeDatabase() {
   if (!db) return;
   try {
@@ -781,5 +1201,21 @@ module.exports = {
   insertLabelReprintInTx,
   checkRecentReprint,
   getLabelReprints,
-  getLabelReprintsCount
+  getLabelReprintsCount,
+  createWorkorder,
+  createWorkorderInTx,
+  addWorkorderSample,
+  addWorkorderSampleInTx,
+  getWorkorderById,
+  getWorkorderByNo,
+  getWorkorderSamples,
+  getWorkorders,
+  getWorkordersCount,
+  assignWorkorder,
+  assignWorkorderInTx,
+  updateWorkorderStatus,
+  updateWorkorderStatusInTx,
+  checkOpenWorkorderForSample,
+  checkOpenWorkorderForSampleInTx,
+  getWorkordersBySampleId
 };

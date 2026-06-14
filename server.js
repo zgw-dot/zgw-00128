@@ -2,7 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
-const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx, insertAuditLog, insertAuditLogInTx, getUserZoneIds, insertLabelReprint, insertLabelReprintInTx, checkRecentReprint, getLabelReprints, getLabelReprintsCount } = require('./db');
+const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx, insertAuditLog, insertAuditLogInTx, getUserZoneIds, insertLabelReprint, insertLabelReprintInTx, checkRecentReprint, getLabelReprints, getLabelReprintsCount, createWorkorder, createWorkorderInTx, addWorkorderSample, addWorkorderSampleInTx, getWorkorderById, getWorkorderByNo, getWorkorderSamples, getWorkorders, getWorkordersCount, assignWorkorder, assignWorkorderInTx, updateWorkorderStatus, updateWorkorderStatusInTx, checkOpenWorkorderForSample, checkOpenWorkorderForSampleInTx, getWorkordersBySampleId } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -36,7 +36,12 @@ const ACTION_LABELS = {
   reserved_outbound: '预约出库',
   borrow_out: '领用出库',
   borrow_return: '领用归还',
-  label_reprint: '标签补打'
+  label_reprint: '标签补打',
+  workorder_create: '创建异常工单',
+  workorder_assign: '工单被指派',
+  workorder_process: '工单处理',
+  workorder_close: '工单关闭',
+  workorder_reject: '工单驳回'
 };
 
 const RESERVATION_STATUS_LABELS = {
@@ -76,6 +81,25 @@ const DISCREPANCY_STATUS_LABELS = {
   ignored: '已忽略'
 };
 
+const WORKORDER_TYPE_LABELS = {
+  zone_mismatch: '温区不匹配',
+  temp_exception: '温控异常',
+  outbound_scanned: '已出库样本被扫'
+};
+
+const WORKORDER_STATUS_LABELS = {
+  pending: '待处理',
+  processing: '处理中',
+  closed: '已关闭',
+  rejected: '已驳回'
+};
+
+const WORKORDER_PRIORITY_LABELS = {
+  low: '低',
+  medium: '中',
+  high: '高'
+};
+
 const ROLE_LABELS = {
   admin: '管理员',
   warehouse: '库管员',
@@ -104,7 +128,12 @@ const AUDIT_ACTION_LABELS = {
   borrowing_borrow: '确认借出',
   borrowing_return: '归还样本',
   borrowing_overdue: '领用逾期',
-  label_reprint: '标签补打'
+  label_reprint: '标签补打',
+  workorder_create: '创建工单',
+  workorder_assign: '指派工单',
+  workorder_close: '关闭工单',
+  workorder_reject: '驳回工单',
+  workorder_process: '处理工单'
 };
 
 const AUDIT_OBJECT_LABELS = {
@@ -118,7 +147,9 @@ const AUDIT_OBJECT_LABELS = {
   item_threshold: '物品阈值',
   sample_reservation: '样本预约',
   sample_borrowing: '样本领用',
-  label_reprint: '标签补打'
+  label_reprint: '标签补打',
+  temperature_workorder: '温控异常工单',
+  workorder_sample: '工单样本'
 };
 
 const sessions = new Map();
@@ -3901,6 +3932,537 @@ app.get('/api/label-reprints/export/csv', requireAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="label_reprints_${timestamp}.csv"`);
   res.send(csv);
+});
+
+function canAccessWorkorder(workorderId, user) {
+  const u = user || currentUser;
+  if (!u) return false;
+  if (u.role === 'admin') return true;
+  const samples = getWorkorderSamples(workorderId);
+  if (samples.length === 0) return false;
+  const allowedZones = getUserZoneIds(u.id);
+  for (const s of samples) {
+    if (s.zone_id && allowedZones.includes(s.zone_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+app.post('/api/workorders', requireWrite, (req, res) => {
+  const {
+    type, title, description, priority,
+    suggested_handler_id, suggested_handler_name,
+    deadline, source_type, source_id,
+    sample_ids, sample_barcodes
+  } = req.body;
+
+  if (!type || !title) {
+    return res.json({ success: false, error: '异常类型和标题必填' });
+  }
+  if (!WORKORDER_TYPE_LABELS[type]) {
+    return res.json({ success: false, error: '无效的异常类型' });
+  }
+  if ((!sample_ids || sample_ids.length === 0) && (!sample_barcodes || sample_barcodes.length === 0)) {
+    return res.json({ success: false, error: '请至少选择一个样本' });
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const operatorId = currentUser.id;
+
+  const samplesToAdd = [];
+  let crossZone = false;
+  let duplicateOpen = false;
+  let outboundSample = false;
+  let firstOpenWorkorder = null;
+  let firstOutboundSample = null;
+
+  if (sample_ids && sample_ids.length > 0) {
+    for (const sid of sample_ids) {
+      const sample = getSampleWithDetails(sid);
+      if (!sample) continue;
+
+      if (!canAccessSample(sid)) {
+        crossZone = true;
+        continue;
+      }
+
+      const openWo = checkOpenWorkorderForSample(sid);
+      if (openWo) {
+        duplicateOpen = true;
+        if (!firstOpenWorkorder) firstOpenWorkorder = openWo;
+        continue;
+      }
+
+      if (sample.status === 'outbound' && type !== 'outbound_scanned') {
+        outboundSample = true;
+        if (!firstOutboundSample) firstOutboundSample = sample;
+        continue;
+      }
+
+      samplesToAdd.push({
+        sample_id: sample.id,
+        sample_barcode: sample.barcode,
+        sample_name: sample.name,
+        batch_no: sample.batch_no,
+        zone_id: sample.required_zone_id || null,
+        zone_name: sample.required_zone_name || null,
+        location_id: sample.current_location_id || null,
+        location_code: sample.location_code || null,
+        sample_status: sample.status
+      });
+    }
+  }
+
+  if (sample_barcodes && sample_barcodes.length > 0) {
+    for (const barcode of sample_barcodes) {
+      const sample = getSampleByBarcode(barcode);
+      if (!sample) continue;
+
+      if (!canAccessSample(sample.id)) {
+        crossZone = true;
+        continue;
+      }
+
+      const openWo = checkOpenWorkorderForSample(sample.id);
+      if (openWo) {
+        duplicateOpen = true;
+        if (!firstOpenWorkorder) firstOpenWorkorder = openWo;
+        continue;
+      }
+
+      if (sample.status === 'outbound' && type !== 'outbound_scanned') {
+        outboundSample = true;
+        if (!firstOutboundSample) firstOutboundSample = sample;
+        continue;
+      }
+
+      if (!samplesToAdd.some(s => s.sample_id === sample.id)) {
+        samplesToAdd.push({
+          sample_id: sample.id,
+          sample_barcode: sample.barcode,
+          sample_name: sample.name,
+          batch_no: sample.batch_no,
+          zone_id: sample.required_zone_id || null,
+          zone_name: sample.required_zone_name || null,
+          location_id: sample.current_location_id || null,
+          location_code: sample.location_code || null,
+          sample_status: sample.status
+        });
+      }
+    }
+  }
+
+  if (crossZone) {
+    return res.json({ success: false, error: '无权操作跨温区的样本', forbidden: true });
+  }
+  if (duplicateOpen && firstOpenWorkorder) {
+    return res.json({
+      success: false,
+      error: `存在未关闭的重复工单：${firstOpenWorkorder.workorder_no}`,
+      duplicate_workorder: firstOpenWorkorder
+    });
+  }
+  if (outboundSample && firstOutboundSample) {
+    return res.json({
+      success: false,
+      error: `已出库样本不能创建此类型工单：${firstOutboundSample.barcode}`
+    });
+  }
+  if (samplesToAdd.length === 0) {
+    return res.json({ success: false, error: '没有有效的样本可以添加工单' });
+  }
+
+  let workorderId = null;
+  try {
+    runTransaction(() => {
+      const result = createWorkorderInTx({
+        type, title, description, priority,
+        suggested_handler_id, suggested_handler_name,
+        deadline, source_type, source_id,
+        creator_id: operatorId, creator_name: operator
+      });
+      workorderId = result.lastInsertRowid;
+
+      for (const s of samplesToAdd) {
+        addWorkorderSampleInTx(workorderId, s);
+        if (s.sample_id) {
+          addTimelineInTx(s.sample_id, 'workorder_create', null, null, null,
+            `创建温控异常工单：${title}`, operator);
+        }
+      }
+
+      insertAuditLogInTx({
+        operator_id: operatorId,
+        operator_name: operator,
+        ip_address: getClientIp(req),
+        action_type: 'workorder_create',
+        object_type: 'temperature_workorder',
+        object_id: String(workorderId),
+        before_value: null,
+        after_value: {
+          type, title, status: 'pending',
+          sample_count: samplesToAdd.length
+        },
+        remark: `创建温控异常工单：${title}`
+      });
+    });
+
+    res.json({ success: true, data: { id: workorderId } });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/workorders', requireAuth, (req, res) => {
+  const { status, type, keyword, zone_id, batch_no, barcode, page, page_size } = req.query;
+  const accessibleZones = getAccessibleZoneIds();
+
+  const filters = {
+    status,
+    type,
+    keyword,
+    zone_id: zone_id ? parseInt(zone_id) : null,
+    batch_no,
+    barcode,
+    page: page ? parseInt(page) : 1,
+    page_size: page_size ? parseInt(page_size) : 20,
+    accessible_zones: accessibleZones
+  };
+
+  const list = getWorkorders(filters);
+  const total = getWorkordersCount(filters);
+
+  list.forEach(wo => {
+    wo.type_label = WORKORDER_TYPE_LABELS[wo.type] || wo.type;
+    wo.status_label = WORKORDER_STATUS_LABELS[wo.status] || wo.status;
+    wo.priority_label = WORKORDER_PRIORITY_LABELS[wo.priority] || wo.priority;
+  });
+
+  res.json({
+    success: true,
+    data: {
+      list,
+      total,
+      page: filters.page,
+      page_size: filters.page_size
+    }
+  });
+});
+
+app.get('/api/workorders/:id', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const workorder = getWorkorderById(id);
+  if (!workorder) {
+    return res.json({ success: false, error: '工单不存在' });
+  }
+  if (!canAccessWorkorder(id)) {
+    return res.json({ success: false, error: '无权查看该工单', forbidden: true });
+  }
+
+  workorder.type_label = WORKORDER_TYPE_LABELS[workorder.type] || workorder.type;
+  workorder.status_label = WORKORDER_STATUS_LABELS[workorder.status] || workorder.status;
+  workorder.priority_label = WORKORDER_PRIORITY_LABELS[workorder.priority] || workorder.priority;
+  workorder.samples = getWorkorderSamples(id);
+
+  res.json({ success: true, data: workorder });
+});
+
+app.post('/api/workorders/:id/assign', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { assigned_to_id, assigned_to_name } = req.body;
+
+  const workorder = getWorkorderById(id);
+  if (!workorder) {
+    return res.json({ success: false, error: '工单不存在' });
+  }
+  if (!assigned_to_id) {
+    return res.json({ success: false, error: '请选择处理人' });
+  }
+  if (workorder.status === 'closed' || workorder.status === 'rejected') {
+    return res.json({ success: false, error: '该工单状态无法指派' });
+  }
+
+  const targetUser = queryOne('SELECT * FROM users WHERE id = ?', [assigned_to_id]);
+  if (!targetUser) {
+    return res.json({ success: false, error: '处理人不存在' });
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const operatorId = currentUser.id;
+
+  const beforeStatus = workorder.status;
+  const beforeAssigned = workorder.assigned_to_name;
+
+  try {
+    runTransaction(() => {
+      assignWorkorderInTx(id, assigned_to_id, assigned_to_name || targetUser.real_name || targetUser.username);
+
+      const samples = getWorkorderSamples(id);
+      for (const s of samples) {
+        if (s.sample_id) {
+          addTimelineInTx(s.sample_id, 'workorder_assign', null, null, null,
+            `工单被指派给 ${assigned_to_name || targetUser.real_name || targetUser.username}`,
+            operator);
+        }
+      }
+
+      insertAuditLogInTx({
+        operator_id: operatorId,
+        operator_name: operator,
+        ip_address: getClientIp(req),
+        action_type: 'workorder_assign',
+        object_type: 'temperature_workorder',
+        object_id: String(id),
+        before_value: { status: beforeStatus, assigned_to: beforeAssigned },
+        after_value: { status: 'processing', assigned_to: assigned_to_name || targetUser.real_name || targetUser.username },
+        remark: `指派工单给 ${assigned_to_name || targetUser.real_name || targetUser.username}`
+      });
+    });
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/workorders/:id/process', requireWrite, (req, res) => {
+  const { id } = req.params;
+  const { handle_result, handle_remark } = req.body;
+
+  const workorder = getWorkorderById(id);
+  if (!workorder) {
+    return res.json({ success: false, error: '工单不存在' });
+  }
+  if (workorder.status !== 'processing') {
+    return res.json({ success: false, error: '只有处理中的工单可以提交处理结果' });
+  }
+  if (!canAccessWorkorder(id)) {
+    return res.json({ success: false, error: '无权处理该工单', forbidden: true });
+  }
+  if (currentUser.role !== 'admin' && workorder.assigned_to_id !== currentUser.id) {
+    return res.json({ success: false, error: '只能处理指派给自己的工单', forbidden: true });
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const operatorId = currentUser.id;
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const beforeStatus = workorder.status;
+
+  try {
+    runTransaction(() => {
+      updateWorkorderStatusInTx(id, 'processing', {
+        handler_id: operatorId,
+        handler_name: operator,
+        handle_result,
+        handle_remark,
+        handled_at: now
+      });
+
+      const samples = getWorkorderSamples(id);
+      for (const s of samples) {
+        if (s.sample_id) {
+          addTimelineInTx(s.sample_id, 'workorder_process', null, null, null,
+            `工单处理：${handle_result || '提交处理结果'}`,
+            operator);
+        }
+      }
+
+      insertAuditLogInTx({
+        operator_id: operatorId,
+        operator_name: operator,
+        ip_address: getClientIp(req),
+        action_type: 'workorder_process',
+        object_type: 'temperature_workorder',
+        object_id: String(id),
+        before_value: { status: beforeStatus },
+        after_value: { status: 'processing', handle_result, handle_remark },
+        remark: `提交工单处理结果：${handle_result || ''}`
+      });
+    });
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/workorders/:id/close', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { close_remark } = req.body;
+
+  const workorder = getWorkorderById(id);
+  if (!workorder) {
+    return res.json({ success: false, error: '工单不存在' });
+  }
+  if (workorder.status === 'closed' || workorder.status === 'rejected') {
+    return res.json({ success: false, error: '该工单已关闭或已驳回' });
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const operatorId = currentUser.id;
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const beforeStatus = workorder.status;
+
+  try {
+    runTransaction(() => {
+      updateWorkorderStatusInTx(id, 'closed', {
+        handler_id: operatorId,
+        handler_name: operator,
+        handle_remark: close_remark || workorder.handle_remark,
+        closed_at: now
+      });
+
+      const samples = getWorkorderSamples(id);
+      for (const s of samples) {
+        if (s.sample_id) {
+          addTimelineInTx(s.sample_id, 'workorder_close', null, null, null,
+            `工单已关闭：${close_remark || '正常关闭'}`,
+            operator);
+        }
+      }
+
+      insertAuditLogInTx({
+        operator_id: operatorId,
+        operator_name: operator,
+        ip_address: getClientIp(req),
+        action_type: 'workorder_close',
+        object_type: 'temperature_workorder',
+        object_id: String(id),
+        before_value: { status: beforeStatus },
+        after_value: { status: 'closed' },
+        remark: `关闭工单：${close_remark || '正常关闭'}`
+      });
+    });
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/workorders/:id/reject', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { reject_reason } = req.body;
+
+  const workorder = getWorkorderById(id);
+  if (!workorder) {
+    return res.json({ success: false, error: '工单不存在' });
+  }
+  if (workorder.status === 'closed' || workorder.status === 'rejected') {
+    return res.json({ success: false, error: '该工单已关闭或已驳回' });
+  }
+  if (!reject_reason) {
+    return res.json({ success: false, error: '请填写驳回原因' });
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const operatorId = currentUser.id;
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const beforeStatus = workorder.status;
+
+  try {
+    runTransaction(() => {
+      updateWorkorderStatusInTx(id, 'rejected', {
+        reject_reason,
+        rejected_at: now,
+        handler_id: operatorId,
+        handler_name: operator
+      });
+
+      const samples = getWorkorderSamples(id);
+      for (const s of samples) {
+        if (s.sample_id) {
+          addTimelineInTx(s.sample_id, 'workorder_reject', null, null, null,
+            `工单被驳回：${reject_reason}`,
+            operator);
+        }
+      }
+
+      insertAuditLogInTx({
+        operator_id: operatorId,
+        operator_name: operator,
+        ip_address: getClientIp(req),
+        action_type: 'workorder_reject',
+        object_type: 'temperature_workorder',
+        object_id: String(id),
+        before_value: { status: beforeStatus },
+        after_value: { status: 'rejected', reject_reason },
+        remark: `驳回工单：${reject_reason}`
+      });
+    });
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/workorders/export/csv', requireAuth, (req, res) => {
+  const { status, type, keyword, zone_id, batch_no, barcode } = req.query;
+  const accessibleZones = getAccessibleZoneIds();
+
+  const filters = {
+    status,
+    type,
+    keyword,
+    zone_id: zone_id ? parseInt(zone_id) : null,
+    batch_no,
+    barcode,
+    accessible_zones: accessibleZones
+  };
+
+  const list = getWorkorders(filters);
+
+  const header = ['工单号', '类型', '标题', '状态', '优先级', '创建人', '指派给', '截止时间', '创建时间', '处理结果', '处理备注', '关闭时间', '驳回原因'];
+  const lines = [header.join(',')];
+
+  list.forEach(wo => {
+    lines.push([
+      `"${wo.workorder_no || ''}"`,
+      `"${WORKORDER_TYPE_LABELS[wo.type] || wo.type || ''}"`,
+      `"${(wo.title || '').replace(/"/g, '""')}"`,
+      `"${WORKORDER_STATUS_LABELS[wo.status] || wo.status || ''}"`,
+      `"${WORKORDER_PRIORITY_LABELS[wo.priority] || wo.priority || ''}"`,
+      `"${wo.creator_name || ''}"`,
+      `"${wo.assigned_to_name || ''}"`,
+      `"${wo.deadline || ''}"`,
+      `"${wo.created_at || ''}"`,
+      `"${(wo.handle_result || '').replace(/"/g, '""')}"`,
+      `"${(wo.handle_remark || '').replace(/"/g, '""')}"`,
+      `"${wo.closed_at || ''}"`,
+      `"${(wo.reject_reason || '').replace(/"/g, '""')}"`
+    ].join(','));
+  });
+
+  const csv = '\ufeff' + lines.join('\r\n');
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="workorders_${timestamp}.csv"`);
+  res.send(csv);
+});
+
+app.get('/api/samples/:id/workorders', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const sample = getSampleWithDetails(id);
+  if (!sample) {
+    return res.json({ success: false, error: '样本不存在' });
+  }
+  if (!canAccessSample(id)) {
+    return res.json({ success: false, error: '无权查看该样本', forbidden: true });
+  }
+
+  const workorders = getWorkordersBySampleId(id);
+  workorders.forEach(wo => {
+    wo.type_label = WORKORDER_TYPE_LABELS[wo.type] || wo.type;
+    wo.status_label = WORKORDER_STATUS_LABELS[wo.status] || wo.status;
+    wo.priority_label = WORKORDER_PRIORITY_LABELS[wo.priority] || wo.priority;
+  });
+
+  res.json({ success: true, data: workorders });
 });
 
 initDatabase().then(() => {
