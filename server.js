@@ -2,7 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
-const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx } = require('./db');
+const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx, insertAuditLog, insertAuditLogInTx } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -59,7 +59,79 @@ const ROLE_LABELS = {
   viewer: '只读用户'
 };
 
+const AUDIT_ACTION_LABELS = {
+  login: '登录',
+  logout: '登出',
+  inbound: '入库',
+  transfer: '转移',
+  outbound: '出库',
+  scrap: '报废',
+  inventory_import: '盘点导入',
+  correction: '纠错',
+  reverse: '撤销'
+};
+
+const AUDIT_OBJECT_LABELS = {
+  sample: '样本',
+  inventory_order: '盘点单',
+  discrepancy: '差异记录',
+  timeline: '操作记录',
+  user: '用户'
+};
+
 let currentUser = null;
+
+function getClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) {
+    return forwarded.split(',')[0].trim();
+  }
+  const realIp = req.headers['x-real-ip'];
+  if (realIp) return realIp;
+  const ip = req.connection.remoteAddress || req.socket.remoteAddress ||
+    (req.connection.socket ? req.connection.socket.remoteAddress : null);
+  if (ip && ip.startsWith('::ffff:')) return ip.substring(7);
+  if (ip === '::1') return '127.0.0.1';
+  return ip || 'unknown';
+}
+
+function addAuditLog(req, actionType, objectType, objectId, beforeValue, afterValue, remark) {
+  const ip = getClientIp(req);
+  const opId = currentUser ? currentUser.id : null;
+  const opName = currentUser ? (currentUser.real_name || currentUser.username) : null;
+  try {
+    insertAuditLog({
+      operator_id: opId,
+      operator_name: opName,
+      ip_address: ip,
+      action_type: actionType,
+      object_type: objectType,
+      object_id: objectId,
+      before_value: beforeValue,
+      after_value: afterValue,
+      remark: remark
+    });
+  } catch (e) {
+    console.error('写入审计日志失败:', e.message);
+  }
+}
+
+function addAuditLogInTx(req, actionType, objectType, objectId, beforeValue, afterValue, remark) {
+  const ip = getClientIp(req);
+  const opId = currentUser ? currentUser.id : null;
+  const opName = currentUser ? (currentUser.real_name || currentUser.username) : null;
+  insertAuditLogInTx({
+    operator_id: opId,
+    operator_name: opName,
+    ip_address: ip,
+    action_type: actionType,
+    object_type: objectType,
+    object_id: objectId,
+    before_value: beforeValue,
+    after_value: afterValue,
+    remark: remark
+  });
+}
 
 function getLocationOccupancy(locationId) {
   const row = queryOne(
@@ -354,6 +426,7 @@ app.post('/api/auth/login', (req, res) => {
   }
   const user = queryOne('SELECT * FROM users WHERE username = ? AND password = ?', [username, password]);
   if (!user) {
+    addAuditLog(req, 'login', 'user', username, null, null, '登录失败：用户名或密码错误');
     return res.json({ success: false, error: '用户名或密码错误' });
   }
   currentUser = {
@@ -363,10 +436,21 @@ app.post('/api/auth/login', (req, res) => {
     real_name: user.real_name,
     role_label: ROLE_LABELS[user.role] || user.role
   };
+  addAuditLog(req, 'login', 'user', user.id,
+    null,
+    { id: user.id, username: user.username, role: user.role, real_name: user.real_name },
+    '登录成功');
   res.json({ success: true, data: currentUser });
 });
 
 app.post('/api/auth/logout', (req, res) => {
+  const userId = currentUser ? currentUser.id : null;
+  const userName = currentUser ? (currentUser.real_name || currentUser.username) : null;
+  const userData = currentUser ? { ...currentUser } : null;
+  addAuditLog(req, 'logout', 'user', userId,
+    userData,
+    null,
+    userName ? `${userName} 登出` : '登出');
   currentUser = null;
   res.json({ success: true });
 });
@@ -600,6 +684,8 @@ app.post('/api/samples/:id/inbound', (req, res) => {
     return res.json({ success: false, error: `温区不匹配：样本应放指定温区，当前库位属于${loc.zone_name}`, warning: true });
   }
 
+  const beforeSample = { ...sample };
+  const targetLoc = loc;
   try {
     runTransaction(() => {
       runInTx(`
@@ -607,6 +693,10 @@ app.post('/api/samples/:id/inbound', (req, res) => {
         updated_at=datetime('now','localtime') WHERE id=?
       `, [location_id, id]);
       addTimelineInTx(id, 'inbound', null, location_id, null, remark || '', operator || 'system');
+      addAuditLogInTx(req, 'inbound', 'sample', id,
+        { status: beforeSample.status, current_location_id: beforeSample.current_location_id },
+        { status: 'in_storage', current_location_id: location_id, location_code: targetLoc.code },
+        remark || `入库到 ${targetLoc.code}`);
     });
     res.json({ success: true });
   } catch (e) {
@@ -646,6 +736,8 @@ app.post('/api/samples/:id/transfer', (req, res) => {
   }
 
   const fromId = sample.current_location_id;
+  const fromLoc = getLocationWithZone(fromId);
+  const beforeTransfer = { ...sample };
   try {
     runTransaction(() => {
       runInTx(`
@@ -653,6 +745,10 @@ app.post('/api/samples/:id/transfer', (req, res) => {
         updated_at=datetime('now','localtime') WHERE id=?
       `, [to_location_id, id]);
       addTimelineInTx(id, 'transfer', fromId, to_location_id, null, remark || '', operator || 'system');
+      addAuditLogInTx(req, 'transfer', 'sample', id,
+        { current_location_id: fromId, location_code: fromLoc ? fromLoc.code : null },
+        { current_location_id: to_location_id, location_code: toLoc.code },
+        remark || `从 ${fromLoc ? fromLoc.code : '未知'} 转移到 ${toLoc.code}`);
     });
     res.json({ success: true });
   } catch (e) {
@@ -675,6 +771,8 @@ app.post('/api/samples/:id/outbound', (req, res) => {
   }
 
   const fromId = sample.current_location_id;
+  const fromLoc = getLocationWithZone(fromId);
+  const beforeOutbound = { ...sample };
   try {
     runTransaction(() => {
       runInTx(`
@@ -682,6 +780,10 @@ app.post('/api/samples/:id/outbound', (req, res) => {
         updated_at=datetime('now','localtime') WHERE id=?
       `, [id]);
       addTimelineInTx(id, 'outbound', fromId, null, null, remark || '', operator || 'system');
+      addAuditLogInTx(req, 'outbound', 'sample', id,
+        { status: beforeOutbound.status, current_location_id: fromId, location_code: fromLoc ? fromLoc.code : null },
+        { status: 'outbound', current_location_id: null },
+        remark || `从 ${fromLoc ? fromLoc.code : '未知'} 出库`);
     });
     res.json({ success: true });
   } catch (e) {
@@ -701,6 +803,8 @@ app.post('/api/samples/:id/scrap', (req, res) => {
   }
 
   const fromId = sample.current_location_id;
+  const fromLoc = getLocationWithZone(fromId);
+  const beforeScrap = { ...sample };
   try {
     runTransaction(() => {
       runInTx(`
@@ -708,6 +812,10 @@ app.post('/api/samples/:id/scrap', (req, res) => {
         updated_at=datetime('now','localtime') WHERE id=?
       `, [id]);
       addTimelineInTx(id, 'scrapped', fromId, null, null, remark || '样本报废', operator || 'system');
+      addAuditLogInTx(req, 'scrap', 'sample', id,
+        { status: beforeScrap.status, current_location_id: fromId, location_code: fromLoc ? fromLoc.code : null },
+        { status: 'scrapped', current_location_id: null },
+        remark || '样本报废');
     });
     res.json({ success: true });
   } catch (e) {
@@ -1037,6 +1145,17 @@ app.post('/api/inventory/:id/import', requireAuth, (req, res) => {
     });
 
     const result = performInventoryMatch(id);
+    addAuditLog(req, 'inventory_import', 'inventory_order', id,
+      null,
+      {
+        imported: uniqueItems.length,
+        duplicates: duplicates.length,
+        total_expected: result ? result.total_expected : 0,
+        total_matched: result ? result.total_matched : 0,
+        total_missing: result ? result.total_missing : 0,
+        total_mislocated: result ? result.total_mislocated : 0
+      },
+      `盘点导入 ${uniqueItems.length} 条扫码数据${duplicates.length > 0 ? `，跳过 ${duplicates.length} 条重复` : ''}`);
     res.json({
       success: true,
       data: {
@@ -1199,6 +1318,8 @@ app.post('/api/discrepancies/:id/resolve', requireAdmin, (req, res) => {
       }
 
       const oldLocId = sample.current_location_id;
+      const oldLoc = getLocationWithZone(oldLocId);
+      const beforeSample = { ...sample };
 
       runTransaction(() => {
         runInTx(`
@@ -1223,6 +1344,23 @@ app.post('/api/discrepancies/:id/resolve', requireAdmin, (req, res) => {
           WHERE id = ?
         `, [currentUser.real_name || currentUser.username, currentUser.id,
             `${currentUser.real_name || currentUser.username}: 位置已修正\n`, id]);
+
+        addAuditLogInTx(req, 'correction', 'discrepancy', id,
+          {
+            sample_id: disp.sample_id,
+            barcode: disp.barcode,
+            discrepancy_type: disp.type,
+            old_location_id: oldLocId,
+            old_location_code: oldLoc ? oldLoc.code : null,
+            sample_status: beforeSample.status
+          },
+          {
+            sample_id: disp.sample_id,
+            status: 'resolved',
+            new_location_id: new_location_id,
+            new_location_code: newLoc.code
+          },
+          `盘点纠错：修正样本位置，从 ${oldLoc ? oldLoc.code : '未知'} 到 ${newLoc.code}${remark ? '，备注：' + remark : ''}`);
       });
     } else if (action === 'ignore') {
       run(`
@@ -1236,17 +1374,22 @@ app.post('/api/discrepancies/:id/resolve', requireAdmin, (req, res) => {
         WHERE id = ?
       `, [currentUser.real_name || currentUser.username, currentUser.id,
           `${currentUser.real_name || currentUser.username}: 忽略，原因：${remark || '无'}\n`, id]);
+      addAuditLog(req, 'correction', 'discrepancy', id,
+        { status: disp.status, type: disp.type, barcode: disp.barcode },
+        { status: 'ignored', handler: currentUser.real_name || currentUser.username },
+        `盘点纠错：忽略差异，原因：${remark || '无'}`);
     } else if (action === 'register_extra' && disp.type === 'extra') {
       const existing = queryOne('SELECT id FROM samples WHERE barcode = ?', [disp.barcode]);
       if (existing) {
         return res.json({ success: false, error: '条码已存在，不能重复登记' });
       }
       const batchNo = req.body.batch_no || 'PD-BATCH-' + Date.now();
+      const sampleName = req.body.name || '盘点补登样本';
       runTransaction(() => {
         const info = runInTx(`
           INSERT INTO samples (barcode, batch_no, name, status)
           VALUES (?, ?, ?, 'pending')
-        `, [disp.barcode, batchNo, req.body.name || '盘点补登样本']);
+        `, [disp.barcode, batchNo, sampleName]);
         addTimelineInTx(info.lastInsertRowid, 'register', null, null,
           null, `盘点补登：${remark || '多扫样本补登'}`,
           currentUser.real_name || currentUser.username);
@@ -1263,6 +1406,16 @@ app.post('/api/discrepancies/:id/resolve', requireAdmin, (req, res) => {
         `, [info.lastInsertRowid,
             currentUser.real_name || currentUser.username, currentUser.id,
             `${currentUser.real_name || currentUser.username}: 已补登样本\n`, id]);
+        addAuditLogInTx(req, 'correction', 'discrepancy', id,
+          { status: disp.status, type: disp.type, barcode: disp.barcode },
+          {
+            status: 'resolved',
+            sample_id: info.lastInsertRowid,
+            barcode: disp.barcode,
+            batch_no: batchNo,
+            name: sampleName
+          },
+          `盘点纠错：补登样本 ${disp.barcode}${remark ? '，备注：' + remark : ''}`);
       });
     } else {
       return res.json({ success: false, error: '无效的处理操作' });
@@ -1383,6 +1536,8 @@ app.post('/api/samples/:id/reverse/:timelineId', requireAdmin, (req, res) => {
 
     try {
       let reversalTimelineId = null;
+      const revFromLoc = getLocationWithZone(original.to_location_id);
+      const revToLoc = getLocationWithZone(original.from_location_id);
       runTransaction(() => {
         runInTx(`
           UPDATE samples SET
@@ -1404,6 +1559,22 @@ app.post('/api/samples/:id/reverse/:timelineId', requireAdmin, (req, res) => {
         `, [timelineId, id,
             currentUser.real_name || currentUser.username, currentUser.id,
             reason, remark || '', reversalTimelineId]);
+
+        addAuditLogInTx(req, 'reverse', 'timeline', timelineId,
+          {
+            sample_id: id,
+            original_action: 'transfer',
+            from_location_id: original.to_location_id,
+            from_location_code: revFromLoc ? revFromLoc.code : null
+          },
+          {
+            sample_id: id,
+            reversal_action: 'reverse_transfer',
+            to_location_id: original.from_location_id,
+            to_location_code: revToLoc ? revToLoc.code : null,
+            reversal_timeline_id: reversalTimelineId
+          },
+          `撤销转移：从 ${revFromLoc ? revFromLoc.code : '未知'} 回退到 ${revToLoc ? revToLoc.code : '未知'}，原因：${reason}${remark ? ' - ' + remark : ''}`);
       });
       res.json({ success: true });
     } catch (e) {
@@ -1429,6 +1600,7 @@ app.post('/api/samples/:id/reverse/:timelineId', requireAdmin, (req, res) => {
 
     try {
       let reversalTimelineId = null;
+      const scrapRestoreLoc = getLocationWithZone(original.from_location_id);
       runTransaction(() => {
         runInTx(`
           UPDATE samples SET
@@ -1451,6 +1623,22 @@ app.post('/api/samples/:id/reverse/:timelineId', requireAdmin, (req, res) => {
         `, [timelineId, id,
             currentUser.real_name || currentUser.username, currentUser.id,
             reason, remark || '', reversalTimelineId]);
+
+        addAuditLogInTx(req, 'reverse', 'timeline', timelineId,
+          {
+            sample_id: id,
+            original_action: 'scrapped',
+            status: 'scrapped'
+          },
+          {
+            sample_id: id,
+            reversal_action: 'reverse_scrapped',
+            status: 'in_storage',
+            location_id: original.from_location_id,
+            location_code: scrapRestoreLoc ? scrapRestoreLoc.code : null,
+            reversal_timeline_id: reversalTimelineId
+          },
+          `撤销报废：恢复到 ${scrapRestoreLoc ? scrapRestoreLoc.code : '未知'}，原因：${reason}${remark ? ' - ' + remark : ''}`);
       });
       res.json({ success: true });
     } catch (e) {
@@ -1560,6 +1748,146 @@ app.get('/api/history/search', requireAuth, (req, res) => {
       inventory_orders: orders
     }
   });
+});
+
+function buildAuditLogQuery(req, forExport = false) {
+  const { operator, action_type, start_date, end_date, object_type, keyword, page, page_size } = req.query;
+
+  let sql = `
+    SELECT al.*,
+      u.username as operator_username
+    FROM audit_log al
+    LEFT JOIN users u ON al.operator_id = u.id
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (operator) {
+    sql += ' AND (al.operator_name LIKE ? OR u.username LIKE ?)';
+    params.push(`%${operator}%`, `%${operator}%`);
+  }
+  if (action_type && action_type !== 'all') {
+    sql += ' AND al.action_type = ?';
+    params.push(action_type);
+  }
+  if (object_type && object_type !== 'all') {
+    sql += ' AND al.object_type = ?';
+    params.push(object_type);
+  }
+  if (start_date) {
+    sql += ' AND date(al.created_at) >= date(?)';
+    params.push(start_date);
+  }
+  if (end_date) {
+    sql += ' AND date(al.created_at) <= date(?)';
+    params.push(end_date);
+  }
+  if (keyword) {
+    sql += ' AND (al.remark LIKE ? OR al.object_id LIKE ? OR al.before_value LIKE ? OR al.after_value LIKE ?)';
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  }
+
+  if (forExport) {
+    sql += ' ORDER BY al.id DESC';
+    return { sql, params };
+  }
+
+  const pageNum = parseInt(page) || 1;
+  const size = parseInt(page_size) || 20;
+  const offset = (pageNum - 1) * size;
+
+  const countSql = `SELECT COUNT(*) as total FROM (${sql}) AS sub`;
+  const total = queryOne(countSql, params) ? queryOne(countSql, params).total : 0;
+
+  sql += ' ORDER BY al.id DESC LIMIT ? OFFSET ?';
+  params.push(size, offset);
+
+  return { sql, params, total, page: pageNum, page_size: size };
+}
+
+function formatAuditLogRows(rows) {
+  return rows.map(r => {
+    const result = { ...r };
+    result.action_label = AUDIT_ACTION_LABELS[r.action_type] || r.action_type;
+    result.object_label = AUDIT_OBJECT_LABELS[r.object_type] || r.object_type;
+    try {
+      result.before_value_parsed = r.before_value ? JSON.parse(r.before_value) : null;
+    } catch { result.before_value_parsed = null; }
+    try {
+      result.after_value_parsed = r.after_value ? JSON.parse(r.after_value) : null;
+    } catch { result.after_value_parsed = null; }
+    return result;
+  });
+}
+
+app.get('/api/audit-log', requireAdmin, (req, res) => {
+  try {
+    const query = buildAuditLogQuery(req, false);
+    const rows = queryAll(query.sql, query.params);
+    const formatted = formatAuditLogRows(rows);
+    res.json({
+      success: true,
+      data: {
+        list: formatted,
+        total: query.total,
+        page: query.page,
+        page_size: query.page_size
+      }
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/audit-log/export/csv', requireAdmin, (req, res) => {
+  try {
+    const query = buildAuditLogQuery(req, true);
+    const rows = queryAll(query.sql, query.params);
+    const formatted = formatAuditLogRows(rows);
+
+    const header = [
+      '时间', '操作人', 'IP地址', '操作类型', '操作对象', '对象ID',
+      '操作前值', '操作后值', '备注'
+    ];
+    const lines = [header.join(',')];
+
+    formatted.forEach(r => {
+      let beforeVal = '';
+      let afterVal = '';
+      try {
+        if (r.before_value) {
+          beforeVal = typeof r.before_value_parsed === 'object' && r.before_value_parsed
+            ? JSON.stringify(r.before_value_parsed) : r.before_value;
+        }
+      } catch {}
+      try {
+        if (r.after_value) {
+          afterVal = typeof r.after_value_parsed === 'object' && r.after_value_parsed
+            ? JSON.stringify(r.after_value_parsed) : r.after_value;
+        }
+      } catch {}
+
+      lines.push([
+        `"${r.created_at || ''}"`,
+        `"${r.operator_name || ''}"`,
+        `"${r.ip_address || ''}"`,
+        `"${r.action_label || r.action_type || ''}"`,
+        `"${r.object_label || r.object_type || ''}"`,
+        `"${r.object_id || ''}"`,
+        `"${beforeVal.replace(/"/g, '""')}"`,
+        `"${afterVal.replace(/"/g, '""')}"`,
+        `"${(r.remark || '').replace(/"/g, '""')}"`
+      ].join(','));
+    });
+
+    const csv = '\ufeff' + lines.join('\r\n');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="audit_log_${timestamp}.csv"`);
+    res.send(csv);
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
 });
 
 initDatabase().then(() => {

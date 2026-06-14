@@ -181,6 +181,22 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      operator_id INTEGER,
+      operator_name TEXT,
+      ip_address TEXT,
+      action_type TEXT NOT NULL,
+      object_type TEXT,
+      object_id TEXT,
+      before_value TEXT,
+      after_value TEXT,
+      remark TEXT
+    )
+  `);
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_barcode ON samples(barcode)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_status ON samples(status)`);
@@ -197,6 +213,10 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_discrepancies_status ON inventory_discrepancies(status)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_reversals_sample ON action_reversals(sample_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_reversals_original ON action_reversals(original_timeline_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_operator ON audit_log(operator_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action_type)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_object ON audit_log(object_type, object_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)`);
   } catch(e) {}
 
   const zoneCount = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones')[0].values[0][0];
@@ -329,6 +349,52 @@ function getLastInsertIdInTx() {
   return getLastInsertId();
 }
 
+function insertAuditLog(params) {
+  const {
+    operator_id, operator_name, ip_address, action_type,
+    object_type, object_id, before_value, after_value, remark
+  } = params;
+  return run(`
+    INSERT INTO audit_log
+    (operator_id, operator_name, ip_address, action_type,
+     object_type, object_id, before_value, after_value, remark)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    operator_id || null,
+    operator_name || null,
+    ip_address || null,
+    action_type,
+    object_type || null,
+    object_id != null ? String(object_id) : null,
+    before_value != null ? JSON.stringify(before_value) : null,
+    after_value != null ? JSON.stringify(after_value) : null,
+    remark || null
+  ]);
+}
+
+function insertAuditLogInTx(params) {
+  const {
+    operator_id, operator_name, ip_address, action_type,
+    object_type, object_id, before_value, after_value, remark
+  } = params;
+  return runInTx(`
+    INSERT INTO audit_log
+    (operator_id, operator_name, ip_address, action_type,
+     object_type, object_id, before_value, after_value, remark)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    operator_id || null,
+    operator_name || null,
+    ip_address || null,
+    action_type,
+    object_type || null,
+    object_id != null ? String(object_id) : null,
+    before_value != null ? JSON.stringify(before_value) : null,
+    after_value != null ? JSON.stringify(after_value) : null,
+    remark || null
+  ]);
+}
+
 module.exports = {
   initDatabase,
   queryAll,
@@ -340,5 +406,7 @@ module.exports = {
   beginTransaction,
   commitTransaction,
   rollbackTransaction,
-  getLastInsertIdInTx
+  getLastInsertIdInTx,
+  insertAuditLog,
+  insertAuditLogInTx
 };
