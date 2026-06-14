@@ -259,6 +259,35 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sample_reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reservation_no TEXT NOT NULL UNIQUE,
+      batch_no TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      reserver_name TEXT NOT NULL,
+      reserver_id INTEGER NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      remark TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      confirmed_at TEXT,
+      used_at TEXT,
+      cancelled_at TEXT,
+      expired_at TEXT
+    )
+  `);
+
+  try {
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_reservations_no ON sample_reservations(reservation_no)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_reservations_batch ON sample_reservations(batch_no)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_reservations_status ON sample_reservations(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_reservations_reserver ON sample_reservations(reserver_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sample_reservations_time ON sample_reservations(start_time, end_time)`);
+  } catch(e) {}
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_barcode ON samples(barcode)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_status ON samples(status)`);

@@ -16,7 +16,8 @@ const STATUS_LABELS = {
   pending: '待入库',
   in_storage: '在库',
   outbound: '已出库',
-  scrapped: '已报废'
+  scrapped: '已报废',
+  reserved_outbound: '已预约出库'
 };
 
 const ACTION_LABELS = {
@@ -28,7 +29,16 @@ const ACTION_LABELS = {
   temp_exception: '温控异常',
   reverse_transfer: '撤销转移',
   reverse_scrapped: '撤销报废',
-  inventory_correction: '盘点纠错'
+  inventory_correction: '盘点纠错',
+  reserved_outbound: '预约出库'
+};
+
+const RESERVATION_STATUS_LABELS = {
+  draft: '草稿',
+  confirmed: '已确认',
+  used: '已使用',
+  cancelled: '已取消',
+  expired: '已过期'
 };
 
 const INVENTORY_STATUS_LABELS = {
@@ -71,7 +81,12 @@ const AUDIT_ACTION_LABELS = {
   correction: '纠错',
   reverse: '撤销',
   threshold_setting: '阈值设置',
-  batch_transition: '批量状态变更'
+  batch_transition: '批量状态变更',
+  reservation_create: '创建预约',
+  reservation_confirm: '确认预约',
+  reservation_use: '使用预约',
+  reservation_cancel: '取消预约',
+  reservation_expire: '预约过期'
 };
 
 const AUDIT_OBJECT_LABELS = {
@@ -82,7 +97,8 @@ const AUDIT_OBJECT_LABELS = {
   user: '用户',
   sample_import_batch: '导入批次',
   inventory_config: '库存配置',
-  item_threshold: '物品阈值'
+  item_threshold: '物品阈值',
+  sample_reservation: '样本预约'
 };
 
 let currentUser = null;
@@ -1123,7 +1139,7 @@ app.get('/api/samples/export/csv', (req, res) => {
   `);
 
   const header = ['条码','批次号','名称','状态','要求温区','库位编码','库位名称','当前温区','创建时间','更新时间'];
-  const statusMap = { pending: '待入库', in_storage: '在库', outbound: '已出库', scrapped: '已报废' };
+  const statusMap = { pending: '待入库', in_storage: '在库', outbound: '已出库', scrapped: '已报废', reserved_outbound: '已预约出库' };
   const lines = [header.join(',')];
   samples.forEach(s => {
     lines.push([
@@ -1445,6 +1461,7 @@ app.get('/api/dashboard/stats', (req, res) => {
   const pending = queryOne("SELECT COUNT(*) as cnt FROM samples WHERE status='pending'").cnt;
   const outbound = queryOne("SELECT COUNT(*) as cnt FROM samples WHERE status='outbound'").cnt;
   const scrapped = queryOne("SELECT COUNT(*) as cnt FROM samples WHERE status='scrapped'").cnt;
+  const reservedOutbound = queryOne("SELECT COUNT(*) as cnt FROM samples WHERE status='reserved_outbound'").cnt;
 
   const tempExceptions = queryOne(
     "SELECT COUNT(*) as cnt FROM sample_timeline WHERE action_type='temp_exception'"
@@ -1486,7 +1503,7 @@ app.get('/api/dashboard/stats', (req, res) => {
   res.json({
     success: true,
     data: {
-      total, inStorage, pending, outbound, scrapped,
+      total, inStorage, pending, outbound, scrapped, reservedOutbound,
       tempExceptions, zoneMismatch,
       fullLocations,
       recentRisks
@@ -1937,7 +1954,7 @@ app.get('/api/inventory/:id/export/csv', requireAuth, (req, res) => {
   `, [id]);
 
   const header = ['条码','批次号','名称','扫码库位','台账库位','匹配状态','差异类型','差异说明','处理状态','处理人','处理时间','处理原因'];
-  const statusMap = { pending: '待入库', in_storage: '在库', outbound: '已出库', scrapped: '已报废' };
+  const statusMap = { pending: '待入库', in_storage: '在库', outbound: '已出库', scrapped: '已报废', reserved_outbound: '已预约出库' };
   const matchMap = { matched: '匹配', mismatch: '不匹配', pending: '待处理' };
   const dispStatusMap = { pending: '待处理', processing: '处理中', resolved: '已解决', ignored: '已忽略' };
 
@@ -2685,7 +2702,7 @@ app.post('/api/batches/:batchNo/transition', requireWrite, (req, res) => {
     return res.json({ success: false, error: 'from_status 和 to_status 必填' });
   }
 
-  const validStatuses = ['pending', 'in_storage', 'outbound', 'scrapped'];
+  const validStatuses = ['pending', 'in_storage', 'outbound', 'scrapped', 'reserved_outbound'];
   if (!validStatuses.includes(from_status)) {
     return res.json({ success: false, error: `无效的源状态: ${from_status}` });
   }
@@ -2857,6 +2874,369 @@ app.delete('/api/user-zone-access/:id', requireAdmin, (req, res) => {
   const { id } = req.params;
   run('DELETE FROM user_zone_access WHERE id = ?', [id]);
   res.json({ success: true });
+});
+
+function generateReservationNo() {
+  const now = new Date();
+  const dateStr = now.getFullYear().toString() +
+    (now.getMonth() + 1).toString().padStart(2, '0') +
+    now.getDate().toString().padStart(2, '0');
+  const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  return `YY${dateStr}${random}`;
+}
+
+function expireOverdueReservations() {
+  const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  const expired = queryAll(`
+    SELECT * FROM sample_reservations
+    WHERE status IN ('draft', 'confirmed')
+    AND end_time < ?
+  `, [now]);
+
+  if (expired.length === 0) return 0;
+
+  let count = 0;
+  runTransaction(() => {
+    for (const r of expired) {
+      runInTx(`
+        UPDATE sample_reservations
+        SET status = 'expired', expired_at = datetime('now','localtime'),
+            updated_at = datetime('now','localtime')
+        WHERE id = ?
+      `, [r.id]);
+      insertAuditLogInTx({
+        operator_id: null,
+        operator_name: 'system',
+        ip_address: '127.0.0.1',
+        action_type: 'reservation_expire',
+        object_type: 'sample_reservation',
+        object_id: String(r.id),
+        before_value: { reservation_no: r.reservation_no, status: r.status, end_time: r.end_time },
+        after_value: { reservation_no: r.reservation_no, status: 'expired' },
+        remark: `预约单 ${r.reservation_no} 已过期自动取消（到期时间: ${r.end_time}）`
+      });
+      count++;
+    }
+  });
+  return count;
+}
+
+function checkReservationConflict(batchNo, startTime, endTime, excludeId) {
+  let sql = `
+    SELECT * FROM sample_reservations
+    WHERE batch_no = ?
+    AND status IN ('draft', 'confirmed')
+    AND start_time < ?
+    AND end_time > ?
+  `;
+  const params = [batchNo, endTime, startTime];
+  if (excludeId) {
+    sql += ' AND id != ?';
+    params.push(excludeId);
+  }
+  return queryAll(sql, params);
+}
+
+app.post('/api/reservations', requireAuth, (req, res) => {
+  const { batch_no, quantity, start_time, end_time, remark } = req.body;
+
+  if (!batch_no) return res.json({ success: false, error: '批次号必填' });
+  if (!quantity || quantity <= 0) return res.json({ success: false, error: '预约数量必须大于0' });
+  if (!start_time) return res.json({ success: false, error: '使用开始时间必填' });
+  if (!end_time) return res.json({ success: false, error: '使用结束时间必填' });
+  if (start_time >= end_time) return res.json({ success: false, error: '开始时间必须早于结束时间' });
+
+  const conflicts = checkReservationConflict(batch_no, start_time, end_time, null);
+  if (conflicts.length > 0) {
+    return res.json({
+      success: false,
+      error: `该批次在指定时段已有预约（${conflicts.map(c => c.reservation_no).join(', ')}）`,
+      conflicts
+    });
+  }
+
+  const reservationNo = generateReservationNo();
+  try {
+    const info = run(`
+      INSERT INTO sample_reservations
+      (reservation_no, batch_no, quantity, reserver_name, reserver_id, start_time, end_time, status, remark)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+    `, [reservationNo, batch_no, quantity,
+        currentUser.real_name || currentUser.username,
+        currentUser.id, start_time, end_time, remark || '']);
+
+    addAuditLog(req, 'reservation_create', 'sample_reservation', String(info.lastInsertRowid),
+      null,
+      { reservation_no: reservationNo, batch_no, quantity, start_time, end_time, status: 'draft' },
+      `创建预约单 ${reservationNo}：批次 ${batch_no}，数量 ${quantity}，时段 ${start_time} ~ ${end_time}`);
+
+    res.json({ success: true, data: { id: info.lastInsertRowid, reservation_no: reservationNo } });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/reservations', requireAuth, (req, res) => {
+  const { status, batch_no, keyword } = req.query;
+
+  expireOverdueReservations();
+
+  let sql = `
+    SELECT sr.*,
+      (SELECT COUNT(*) FROM samples s WHERE s.batch_no = sr.batch_no AND s.status = 'in_storage') as available_stock
+    FROM sample_reservations sr
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (currentUser.role !== 'admin') {
+    sql += ' AND sr.reserver_id = ?';
+    params.push(currentUser.id);
+  }
+
+  if (status && status !== 'all') {
+    sql += ' AND sr.status = ?';
+    params.push(status);
+  }
+  if (batch_no) {
+    sql += ' AND sr.batch_no = ?';
+    params.push(batch_no);
+  }
+  if (keyword) {
+    sql += ' AND (sr.reservation_no LIKE ? OR sr.batch_no LIKE ? OR sr.reserver_name LIKE ?)';
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+  }
+
+  sql += ' ORDER BY sr.id DESC';
+
+  const rows = queryAll(sql, params);
+  rows.forEach(r => {
+    r.status_label = RESERVATION_STATUS_LABELS[r.status] || r.status;
+  });
+
+  res.json({ success: true, data: rows });
+});
+
+app.get('/api/reservations/conflicts', requireAuth, (req, res) => {
+  const { batch_no, start_time, end_time } = req.query;
+
+  if (!batch_no) return res.json({ success: false, error: '批次号必填' });
+  if (!start_time) return res.json({ success: false, error: '开始时间必填' });
+  if (!end_time) return res.json({ success: false, error: '结束时间必填' });
+
+  const conflicts = checkReservationConflict(batch_no, start_time, end_time, null);
+  conflicts.forEach(r => {
+    r.status_label = RESERVATION_STATUS_LABELS[r.status] || r.status;
+  });
+
+  res.json({ success: true, data: conflicts });
+});
+
+app.get('/api/reservations/:id', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const reservation = queryOne('SELECT * FROM sample_reservations WHERE id = ?', [id]);
+  if (!reservation) return res.json({ success: false, error: '预约单不存在' });
+
+  if (currentUser.role !== 'admin' && reservation.reserver_id !== currentUser.id) {
+    return res.json({ success: false, error: '无权查看此预约单', forbidden: true });
+  }
+
+  reservation.status_label = RESERVATION_STATUS_LABELS[reservation.status] || reservation.status;
+
+  const stockRow = queryOne(`
+    SELECT COUNT(*) as cnt FROM samples
+    WHERE batch_no = ? AND status = 'in_storage'
+  `, [reservation.batch_no]);
+  reservation.available_stock = stockRow ? stockRow.cnt : 0;
+
+  res.json({ success: true, data: reservation });
+});
+
+app.put('/api/reservations/:id/confirm', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const { remark } = req.body;
+
+  expireOverdueReservations();
+
+  const reservation = queryOne('SELECT * FROM sample_reservations WHERE id = ?', [id]);
+  if (!reservation) return res.json({ success: false, error: '预约单不存在' });
+
+  if (currentUser.role !== 'admin' && reservation.reserver_id !== currentUser.id) {
+    return res.json({ success: false, error: '无权操作此预约单', forbidden: true });
+  }
+
+  if (reservation.status !== 'draft') {
+    return res.json({ success: false, error: `预约单当前状态为"${RESERVATION_STATUS_LABELS[reservation.status]}"，只有草稿状态才能确认` });
+  }
+
+  const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  if (reservation.end_time < now) {
+    return res.json({ success: false, error: '预约时段已过期，无法确认' });
+  }
+
+  const conflicts = checkReservationConflict(reservation.batch_no, reservation.start_time, reservation.end_time, id);
+  if (conflicts.length > 0) {
+    return res.json({
+      success: false,
+      error: `该批次在相同时段已有其他预约（${conflicts.map(c => c.reservation_no).join(', ')}）`,
+      conflicts
+    });
+  }
+
+  const stockRow = queryOne(`
+    SELECT COUNT(*) as cnt FROM samples
+    WHERE batch_no = ? AND status = 'in_storage'
+  `, [reservation.batch_no]);
+  const availableStock = stockRow ? stockRow.cnt : 0;
+
+  if (availableStock < reservation.quantity) {
+    return res.json({
+      success: false,
+      error: `批次 ${reservation.batch_no} 在库数量不足：需要 ${reservation.quantity}，当前在库 ${availableStock}`,
+      available_stock: availableStock,
+      required_quantity: reservation.quantity
+    });
+  }
+
+  const beforeStatus = reservation.status;
+  try {
+    runTransaction(() => {
+      runInTx(`
+        UPDATE sample_reservations
+        SET status = 'confirmed', confirmed_at = datetime('now','localtime'),
+            updated_at = datetime('now','localtime'), remark = COALESCE(remark, '') || ?
+        WHERE id = ?
+      `, [remark ? ` [确认] ${remark}` : '', id]);
+    });
+
+    addAuditLog(req, 'reservation_confirm', 'sample_reservation', String(id),
+      { reservation_no: reservation.reservation_no, status: beforeStatus },
+      { reservation_no: reservation.reservation_no, status: 'confirmed', available_stock: availableStock, required_quantity: reservation.quantity },
+      `确认预约单 ${reservation.reservation_no}：批次 ${reservation.batch_no}，在库 ${availableStock}，预约 ${reservation.quantity}`);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.put('/api/reservations/:id/use', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const { remark } = req.body;
+
+  expireOverdueReservations();
+
+  const reservation = queryOne('SELECT * FROM sample_reservations WHERE id = ?', [id]);
+  if (!reservation) return res.json({ success: false, error: '预约单不存在' });
+
+  if (currentUser.role !== 'admin' && reservation.reserver_id !== currentUser.id) {
+    return res.json({ success: false, error: '无权操作此预约单', forbidden: true });
+  }
+
+  if (reservation.status !== 'confirmed') {
+    return res.json({ success: false, error: `预约单当前状态为"${RESERVATION_STATUS_LABELS[reservation.status]}"，只有已确认状态才能使用` });
+  }
+
+  const stockRow = queryOne(`
+    SELECT COUNT(*) as cnt FROM samples
+    WHERE batch_no = ? AND status = 'in_storage'
+  `, [reservation.batch_no]);
+  const availableStock = stockRow ? stockRow.cnt : 0;
+
+  if (availableStock < reservation.quantity) {
+    return res.json({
+      success: false,
+      error: `批次 ${reservation.batch_no} 在库数量不足：需要 ${reservation.quantity}，当前在库 ${availableStock}`,
+      available_stock: availableStock,
+      required_quantity: reservation.quantity
+    });
+  }
+
+  const operator = currentUser.real_name || currentUser.username;
+  const beforeStatus = reservation.status;
+  let usedSampleIds = [];
+
+  try {
+    runTransaction(() => {
+      const samples = queryAll(`
+        SELECT * FROM samples
+        WHERE batch_no = ? AND status = 'in_storage'
+        ORDER BY id
+        LIMIT ?
+      `, [reservation.batch_no, reservation.quantity]);
+
+      for (const sample of samples) {
+        const beforeSample = { ...sample };
+        runInTx(`
+          UPDATE samples SET status = 'reserved_outbound', current_location_id = NULL,
+          updated_at = datetime('now','localtime')
+          WHERE id = ?
+        `, [sample.id]);
+
+        addTimelineInTx(sample.id, 'reserved_outbound', sample.current_location_id, null, null,
+          `预约出库：预约单 ${reservation.reservation_no}${remark ? ' - ' + remark : ''}`, operator);
+
+        addAuditLogInTx(req, 'outbound', 'sample', String(sample.id),
+          { status: beforeSample.status, current_location_id: beforeSample.current_location_id },
+          { status: 'reserved_outbound', current_location_id: null, reservation_no: reservation.reservation_no },
+          `预约出库：预约单 ${reservation.reservation_no}`);
+        usedSampleIds.push(sample.id);
+      }
+
+      runInTx(`
+        UPDATE sample_reservations
+        SET status = 'used', used_at = datetime('now','localtime'),
+            updated_at = datetime('now','localtime'), remark = COALESCE(remark, '') || ?
+        WHERE id = ?
+      `, [remark ? ` [使用] ${remark}` : '', id]);
+    });
+
+    addAuditLog(req, 'reservation_use', 'sample_reservation', String(id),
+      { reservation_no: reservation.reservation_no, status: beforeStatus },
+      { reservation_no: reservation.reservation_no, status: 'used', used_samples: usedSampleIds.length },
+      `使用预约单 ${reservation.reservation_no}：标记 ${usedSampleIds.length} 条样本为已预约出库`);
+
+    res.json({ success: true, data: { used_count: usedSampleIds.length } });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.put('/api/reservations/:id/cancel', requireAuth, (req, res) => {
+  const { id } = req.params;
+  const { remark } = req.body;
+
+  const reservation = queryOne('SELECT * FROM sample_reservations WHERE id = ?', [id]);
+  if (!reservation) return res.json({ success: false, error: '预约单不存在' });
+
+  if (currentUser.role !== 'admin' && reservation.reserver_id !== currentUser.id) {
+    return res.json({ success: false, error: '无权操作此预约单', forbidden: true });
+  }
+
+  if (!['draft', 'confirmed'].includes(reservation.status)) {
+    return res.json({ success: false, error: `预约单当前状态为"${RESERVATION_STATUS_LABELS[reservation.status]}"，只有草稿或已确认状态才能取消` });
+  }
+
+  const beforeStatus = reservation.status;
+  try {
+    runTransaction(() => {
+      runInTx(`
+        UPDATE sample_reservations
+        SET status = 'cancelled', cancelled_at = datetime('now','localtime'),
+            updated_at = datetime('now','localtime'), remark = COALESCE(remark, '') || ?
+        WHERE id = ?
+      `, [remark ? ` [取消] ${remark}` : '', id]);
+    });
+
+    addAuditLog(req, 'reservation_cancel', 'sample_reservation', String(id),
+      { reservation_no: reservation.reservation_no, status: beforeStatus },
+      { reservation_no: reservation.reservation_no, status: 'cancelled' },
+      `取消预约单 ${reservation.reservation_no}${remark ? '：' + remark : ''}`);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
 });
 
 initDatabase().then(() => {
