@@ -1,37 +1,39 @@
 {
-  "runId": "mqddzg7x0ai",
-  "createdAt": "2026-06-14T06:11:40.125Z",
+  "runId": "mqdese0c0cf",
+  "createdAt": "2026-06-14T06:34:10.284Z",
   "barcodes": {
-    "S1": "INV-mqddzg7x0ai-S1",
-    "S2": "INV-mqddzg7x0ai-S2",
-    "S3": "INV-mqddzg7x0ai-S3",
-    "S4": "INV-mqddzg7x0ai-S4",
-    "S5": "INV-mqddzg7x0ai-S5",
-    "EXTRA": "INV-mqddzg7x0ai-EXTRA",
-    "SCRAP": "INV-mqddzg7x0ai-SCRAP"
+    "S1": "INV-mqdese0c0cf-S1",
+    "S2": "INV-mqdese0c0cf-S2",
+    "S3": "INV-mqdese0c0cf-S3",
+    "S4": "INV-mqdese0c0cf-S4",
+    "S5": "INV-mqdese0c0cf-S5",
+    "EXTRA": "INV-mqdese0c0cf-EXTRA",
+    "SCRAP": "INV-mqdese0c0cf-SCRAP"
   },
   "batches": {
-    "main": "BATCH-mqddzg7x0ai",
-    "extra": "BATCH-EXTRA-mqddzg7x0ai",
-    "scrap": "BATCH-SCRAP-mqddzg7x0ai"
+    "main": "BATCH-mqdese0c0cf",
+    "extra": "BATCH-EXTRA-mqdese0c0cf",
+    "scrap": "BATCH-SCRAP-mqdese0c0cf"
   },
   "sampleIds": {
-    "S1": 17,
-    "S2": 18,
-    "S3": 19,
-    "S4": 20,
-    "S5": 21
+    "S1": 1,
+    "S2": 2,
+    "S3": 3,
+    "S4": 4,
+    "S5": 5,
+    "EXTRA": 6,
+    "SCRAP": 7
   },
   "inventoryOrderId": 1,
-  "inventoryOrderNo": "PD202606140343",
+  "inventoryOrderNo": "PD202606143949",
   "discrepancyIds": {
-    "mislocated": 8,
-    "extra": 10,
-    "missing": 14,
-    "outbound_scanned": 9
+    "mislocated": 5,
+    "extra": 7,
+    "missing": 8,
+    "outbound_scanned": 6
   },
-  "transferTimelineId": null,
-  "scrapTimelineId": null,
+  "transferTimelineId": 14,
+  "scrapTimelineId": 19,
   "locations": {
     "main": {
       "id": 1,
@@ -43,21 +45,15 @@
     }
   },
   "discrepancyIdsByBarcode": {
-    "INV-mqddzg7x0ai-S3": 8,
-    "INV-mqddzg7x0ai-S5": 9,
-    "INV-mqddzg7x0ai-EXTRA": 10,
-    "C-3": 11,
-    "C-4": 12,
-    "RB-1": 13,
-    "INV-mqddzg7x0ai-S4": 14
+    "INV-mqdese0c0cf-S3": 5,
+    "INV-mqdese0c0cf-S5": 6,
+    "INV-mqdese0c0cf-EXTRA": 7,
+    "INV-mqdese0c0cf-S4": 8
   },
   "discrepancyTypeByBarcode": {
-    "INV-mqddzg7x0ai-S3": "mislocated",
-    "INV-mqddzg7x0ai-S5": "outbound_scanned",
-    "INV-mqddzg7x0ai-EXTRA": "extra",
-    "C-3": "missing",
-    "C-4": "missing",
-    "RB-1": "missing",
-    "INV-mqddzg7x0ai-S4": "missing"
+    "INV-mqdese0c0cf-S3": "mislocated",
+    "INV-mqdese0c0cf-S5": "outbound_scanned",
+    "INV-mqdese0c0cf-EXTRA": "extra",
+    "INV-mqdese0c0cf-S4": "missing"
   }
 }

@@ -444,8 +444,45 @@ function getUserZoneIdsInTx(userId) {
   return rows.map(r => r.zone_id);
 }
 
+function closeDatabase() {
+  if (!db) return;
+  try {
+    if (!inTransaction) {
+      saveDatabase();
+    }
+    db.close();
+    db = null;
+    SQL = null;
+  } catch (e) {
+    console.error('关闭数据库失败:', e.message);
+  }
+}
+
+let shutdownInProgress = false;
+function gracefulShutdown(signal) {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+  console.log(`\n收到 ${signal}，正在优雅关闭...`);
+  try {
+    closeDatabase();
+    console.log('数据库已安全关闭');
+  } catch (e) {
+    console.error('关闭出错:', e.message);
+  }
+  process.exit(0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('beforeExit', () => {
+  if (!shutdownInProgress) {
+    try { closeDatabase(); } catch (e) {}
+  }
+});
+
 module.exports = {
   initDatabase,
+  closeDatabase,
   queryAll,
   queryOne,
   run,

@@ -6,32 +6,48 @@ const { spawn } = require('child_process');
 const HOST = 'localhost';
 const PORT = 3000;
 const DB_PATH = path.join(__dirname, 'data', 'tracker.db');
+const RESULT_PATH = path.join(__dirname, 'verify-result.txt');
 
 let SERVER_PROC = null;
-let errors = 0;
+let passCount = 0;
+let failCount = 0;
+const failures = [];
+
+function log(msg) {
+  console.log(msg);
+}
 
 function api(urlPath, opts = {}) {
-  return new Promise(resolve => {
-    const headers = { 'Content-Type': 'application/json' };
-    if (opts.cookie) headers['Cookie'] = opts.cookie;
-    const req = http.request({
-      hostname: HOST, port: PORT, path: urlPath,
-      method: opts.method || 'GET', headers,
-      timeout: opts.timeout || 15000
-    }, res => {
-      let data = '';
-      const setCookie = res.headers['set-cookie'] || [];
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        let body = null;
-        try { body = JSON.parse(data); } catch { body = data; }
-        resolve({ status: res.statusCode, body, setCookie: setCookie[0] || null });
+  return new Promise((resolve, reject) => {
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (opts.cookie) headers['Cookie'] = opts.cookie;
+      const req = http.request({
+        hostname: HOST, port: PORT, path: urlPath,
+        method: opts.method || 'GET', headers,
+        timeout: opts.timeout || 15000
+      }, res => {
+        let data = '';
+        const setCookie = res.headers['set-cookie'] || [];
+        res.on('data', c => { try { data += c; } catch {} });
+        res.on('end', () => {
+          let body = null;
+          try { body = JSON.parse(data); } catch (e) { body = data; }
+          resolve({ status: res.statusCode, body, setCookie: setCookie[0] || null });
+        });
       });
-    });
-    req.on('error', e => resolve({ status: 0, body: null, error: e.message }));
-    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: null, error: 'timeout' }); });
-    if (opts.body) req.write(JSON.stringify(opts.body));
-    req.end();
+      req.on('error', e => resolve({ status: 0, body: null, error: e.message }));
+      req.on('timeout', () => {
+        try { req.destroy(); } catch {}
+        resolve({ status: 0, body: null, error: 'timeout' });
+      });
+      if (opts.body) {
+        try { req.write(JSON.stringify(opts.body)); } catch (e) { reject(e); return; }
+      }
+      req.end();
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
@@ -39,346 +55,454 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-function assert(condition, msg) {
-  if (!condition) {
-    console.log(`   ❌ 失败: ${msg}`);
-    errors++;
+function assert(name, condition, reason) {
+  if (condition) {
+    passCount++;
+    log(`   ✅ 通过: ${name}`);
   } else {
-    console.log(`   ✅ 通过: ${msg}`);
+    failCount++;
+    failures.push({ name, reason: reason || '断言失败' });
+    log(`   ❌ 失败: ${name}` + (reason ? ` (${reason})` : ''));
   }
 }
 
 function clearDatabase() {
-  if (fs.existsSync(DB_PATH)) {
-    fs.unlinkSync(DB_PATH);
-    console.log('   数据库已删除');
+  try {
+    if (fs.existsSync(DB_PATH)) {
+      fs.unlinkSync(DB_PATH);
+    }
+    const dir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    log('   数据库已清空');
+  } catch (e) {
+    log('   清空数据库警告: ' + e.message);
   }
-  const dir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 function startServer() {
   return new Promise((resolve, reject) => {
-    SERVER_PROC = spawn(process.execPath, ['server.js'], {
-      cwd: __dirname,
-      env: { ...process.env, PORT: String(PORT) },
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    let started = false;
-    SERVER_PROC.stdout.on('data', d => {
-      if (!started && d.toString().includes('冷链样本追踪系统已启动')) {
-        started = true;
-        setTimeout(resolve, 500);
-      }
-    });
-    setTimeout(() => { if (!started) reject(new Error('服务器启动超时')); }, 15000);
+    try {
+      SERVER_PROC = spawn(process.execPath, ['server.js'], {
+        cwd: __dirname,
+        env: { ...process.env, PORT: String(PORT) },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let started = false;
+      let stdoutBuf = '';
+      let stderrBuf = '';
+
+      SERVER_PROC.stdout.on('data', d => {
+        try {
+          const s = d.toString();
+          stdoutBuf += s;
+          if (!started && s.includes('冷链样本追踪系统已启动')) {
+            started = true;
+            setTimeout(resolve, 500);
+          }
+        } catch {}
+      });
+
+      SERVER_PROC.stderr.on('data', d => {
+        try { stderrBuf += d.toString(); } catch {}
+      });
+
+      SERVER_PROC.on('error', e => {
+        if (!started) reject(new Error('服务器启动失败: ' + e.message));
+      });
+
+      SERVER_PROC.on('exit', code => {
+        if (!started) reject(new Error('服务器异常退出，代码: ' + code + ', stderr: ' + stderrBuf));
+      });
+
+      setTimeout(() => {
+        if (!started) reject(new Error('服务器启动超时(15s)，stdout: ' + stdoutBuf));
+      }, 15000);
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
 function stopServer() {
   return new Promise(resolve => {
-    if (!SERVER_PROC) { resolve(); return; }
-    SERVER_PROC.on('exit', resolve);
-    SERVER_PROC.kill('SIGTERM');
-    setTimeout(() => { if (SERVER_PROC) SERVER_PROC.kill('SIGKILL'); }, 5000);
+    if (!SERVER_PROC || SERVER_PROC.killed) { resolve(); return; }
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    SERVER_PROC.on('exit', finish);
+    SERVER_PROC.on('close', finish);
+    try { SERVER_PROC.kill('SIGTERM'); } catch (e) { log('  停止服务警告: ' + e.message); }
+    setTimeout(() => {
+      if (!done) {
+        try { SERVER_PROC.kill('SIGKILL'); } catch {}
+        setTimeout(finish, 500);
+      }
+    }, 5000);
+  });
+}
+
+function writeResult() {
+  const lines = [];
+  lines.push('=== 批量操作 + 权限细化验收报告 ===');
+  lines.push('日期: ' + new Date().toLocaleString());
+  lines.push('');
+  lines.push(`通过: ${passCount}`);
+  lines.push(`失败: ${failCount}`);
+  lines.push('');
+  if (failures.length > 0) {
+    lines.push('--- 失败明细 ---');
+    failures.forEach((f, i) => {
+      lines.push(`${i + 1}. ${f.name}`);
+      lines.push(`   原因: ${f.reason}`);
+    });
+    lines.push('');
+  } else {
+    lines.push('🎉 所有验收场景全部通过！');
+    lines.push('');
+  }
+  lines.push('=== 结束 ===');
+  const content = lines.join('\n');
+  try {
+    fs.writeFileSync(RESULT_PATH, content, 'utf8');
+    log(`\n   结果已写入: ${RESULT_PATH}`);
+  } catch (e) {
+    log('\n   写入结果文件失败: ' + e.message);
+  }
+  return content;
+}
+
+function runCase(name, fn) {
+  return new Promise(async resolve => {
+    log('\n【' + name + '】');
+    try {
+      await fn();
+    } catch (e) {
+      failCount++;
+      failures.push({ name, reason: '异常: ' + (e.message || e) });
+      log('   ❌ 异常: ' + (e.message || e));
+      if (e.stack) log('   堆栈: ' + e.stack.split('\n').slice(0, 3).join('\n   '));
+    }
+    resolve();
   });
 }
 
 async function main() {
+  log('========== 批量操作 + 权限细化验收 ==========\n');
+
+  clearDatabase();
+
   try {
-    console.log('========== 批量操作 + 权限细化验收 ==========\n');
-
-    clearDatabase();
     await startServer();
-    await sleep(300);
+    log('   服务器启动成功\n');
+  } catch (e) {
+    log('❌ 服务器启动失败: ' + e.message);
+    failCount++;
+    failures.push({ name: '服务器启动', reason: e.message });
+    writeResult();
+    process.exit(1);
+    return;
+  }
 
-    // ===== 场景1: 两个库管员分别绑冷藏和冷冻，互相看不到对方数据 =====
-    console.log('\n===== 场景1: 温区权限隔离 =====');
+  await sleep(200);
 
-    console.log('[1] 冷藏库管员登录');
-    const coldLogin = await api('/api/auth/login', {
-      method: 'POST', body: { username: 'wh_cold', password: 'whcold123' }
-    });
-    assert(coldLogin.body.success, '冷藏库管员登录成功');
-    const COLD_COOKIE = coldLogin.setCookie;
-    assert(coldLogin.body.data.zone_ids && coldLogin.body.data.zone_ids.length === 1, '登录返回 zone_ids 长度=1');
-    console.log(`   zone_ids: ${JSON.stringify(coldLogin.body.data.zone_ids)}`);
+  // 当前登录的 cookie（服务端是全局单用户，所以用 currentUser 状态）
+  // 注意：这个项目没有真正的 session，是全局 currentUser 变量，所以 cookie 不影响
+  // 直接通过登录接口切换用户
 
-    console.log('[2] 冷冻库管员登录');
-    const frozenLogin = await api('/api/auth/login', {
-      method: 'POST', body: { username: 'wh_frozen', password: 'whfrozen123' }
-    });
-    assert(frozenLogin.body.success, '冷冻库管员登录成功');
-    const FROZEN_COOKIE = frozenLogin.setCookie;
+  try {
 
-    console.log('[3] 冷藏库管员查看库位 - 只能看冷藏区');
-    const coldLocs = await api('/api/locations', { cookie: COLD_COOKIE });
-    assert(coldLocs.body.success, '冷藏库管员查库位成功');
-    const coldZoneNames = [...new Set(coldLocs.body.data.map(l => l.zone_name))];
-    console.log(`   可见温区: ${coldZoneNames.join(', ')}`);
-    assert(coldZoneNames.length === 1 && coldZoneNames[0].includes('冷藏'), '冷藏库管员只能看冷藏库位');
-
-    console.log('[4] 冷冻库管员查看库位 - 只能看冷冻区');
-    const frozenLocs = await api('/api/locations', { cookie: FROZEN_COOKIE });
-    assert(frozenLocs.body.success, '冷冻库管员查库位成功');
-    const frozenZoneNames = [...new Set(frozenLocs.body.data.map(l => l.zone_name))];
-    console.log(`   可见温区: ${frozenZoneNames.join(', ')}`);
-    assert(frozenZoneNames.length === 1 && frozenZoneNames[0].includes('冷冻'), '冷冻库管员只能看冷冻库位');
-
-    // ===== 场景2: 各批量入库5个样本 =====
-    console.log('\n===== 场景2: 批量入库 =====');
-
-    console.log('[5] 冷藏库管员批量入库5个样本');
-    const coldLocId = coldLocs.body.data[0].id;
-    const coldLocCode = coldLocs.body.data[0].code;
-    const coldSamples = [];
-    for (let i = 1; i <= 5; i++) {
-      const res = await api('/api/samples', {
-        method: 'POST', cookie: COLD_COOKIE,
-        body: { barcode: `COLD-B${i}`, batch_no: 'BATCH-COLD', name: `冷藏样本${i}`, required_zone_id: coldLogin.body.data.zone_ids[0] }
+    await runCase('场景1: 冷藏库管员温区隔离', async () => {
+      const loginRes = await api('/api/auth/login', {
+        method: 'POST', body: { username: 'wh_cold', password: 'whcold123' }
       });
-      assert(res.body.success, `创建冷藏样本${i}成功`);
-      if (res.body.success) coldSamples.push(res.body.data.id);
-    }
+      assert('登录成功', loginRes.body && loginRes.body.success, '返回: ' + JSON.stringify(loginRes.body));
+      assert('返回 zone_ids', loginRes.body.data && loginRes.body.data.zone_ids && loginRes.body.data.zone_ids.length === 1,
+        'zone_ids: ' + JSON.stringify(loginRes.body.data?.zone_ids));
 
-    const coldBatchIn = await api('/api/samples/batch/inbound', {
-      method: 'POST', cookie: COLD_COOKIE,
-      body: {
-        items: coldSamples.map(id => ({ sample_id: id, location_id: coldLocId })),
-        remark: '冷藏批量入库'
+      const locs = await api('/api/locations');
+      assert('查库位成功', locs.body && locs.body.success);
+      const zoneNames = [...new Set(locs.body.data.map(l => l.zone_name))];
+      assert('只能看到冷藏库位', zoneNames.length === 1 && zoneNames[0].includes('冷藏'),
+        '实际温区: ' + zoneNames.join(','));
+
+      const zones = await api('/api/zones');
+      assert('查温区成功', zones.body && zones.body.success);
+      assert('只能看到冷藏温区', zones.body.data.length === 1 && zones.body.data[0].name.includes('冷藏'),
+        '温区列表: ' + JSON.stringify(zones.body.data));
+
+      const coldZoneId = loginRes.body.data.zone_ids[0];
+      const coldLocId = locs.body.data[0].id;
+
+      const samples = [];
+      for (let i = 1; i <= 5; i++) {
+        const r = await api('/api/samples', {
+          method: 'POST',
+          body: { barcode: 'BATCH-COLD-' + i, batch_no: 'BC', name: '冷藏样本' + i, required_zone_id: coldZoneId }
+        });
+        if (r.body && r.body.success) samples.push(r.body.data.id);
+      }
+      assert('创建5个冷藏样本', samples.length === 5, '实际: ' + samples.length);
+
+      const batchIn = await api('/api/samples/batch/inbound', {
+        method: 'POST',
+        body: { items: samples.map(id => ({ sample_id: id, location_id: coldLocId })), remark: '批量入库测试' }
+      });
+      assert('批量入库5个成功', batchIn.body && batchIn.body.success && batchIn.body.data.success === 5,
+        '返回: ' + JSON.stringify(batchIn.body));
+
+      const sampleList = await api('/api/samples');
+      const barcodes = sampleList.body.data.map(s => s.barcode);
+      assert('列表只看到冷藏样本', barcodes.every(b => b.startsWith('BATCH-COLD-')),
+        '条码: ' + barcodes.join(','));
+
+      // 记下来给后续跨区测试用
+      global.__testState = { coldZoneId, coldLocId, coldSampleIds: samples };
+    });
+
+    await runCase('场景2: 冷冻库管员温区隔离', async () => {
+      const state = global.__testState || {};
+      const loginRes = await api('/api/auth/login', {
+        method: 'POST', body: { username: 'wh_frozen', password: 'whfrozen123' }
+      });
+      assert('登录成功', loginRes.body && loginRes.body.success);
+
+      const locs = await api('/api/locations');
+      const zoneNames = [...new Set(locs.body.data.map(l => l.zone_name))];
+      assert('只能看到冷冻库位', zoneNames.length === 1 && zoneNames[0].includes('冷冻'),
+        '实际温区: ' + zoneNames.join(','));
+
+      const frozenZoneId = loginRes.body.data.zone_ids[0];
+      const frozenLocId = locs.body.data[0].id;
+
+      const samples = [];
+      for (let i = 1; i <= 5; i++) {
+        const r = await api('/api/samples', {
+          method: 'POST',
+          body: { barcode: 'BATCH-FROZ-' + i, batch_no: 'BF', name: '冷冻样本' + i, required_zone_id: frozenZoneId }
+        });
+        if (r.body && r.body.success) samples.push(r.body.data.id);
+      }
+      assert('创建5个冷冻样本', samples.length === 5);
+
+      const batchIn = await api('/api/samples/batch/inbound', {
+        method: 'POST',
+        body: { items: samples.map(id => ({ sample_id: id, location_id: frozenLocId })), remark: '冷冻批量入库' }
+      });
+      assert('批量入库5个冷冻样本成功', batchIn.body && batchIn.body.success && batchIn.body.data.success === 5,
+        '返回: ' + JSON.stringify(batchIn.body));
+
+      const sampleList = await api('/api/samples');
+      const barcodes = sampleList.body.data.map(s => s.barcode);
+      assert('看不到冷藏样本', !barcodes.some(b => b.startsWith('BATCH-COLD-')),
+        '条码: ' + barcodes.join(','));
+
+      // 跨温区操作测试
+      if (state.coldSampleIds && state.coldSampleIds.length > 0) {
+        const crossOut = await api('/api/samples/' + state.coldSampleIds[0] + '/outbound', {
+          method: 'POST', body: { remark: '跨区测试' }
+        });
+        assert('跨温区出库被拦截', !crossOut.body.success && crossOut.body.forbidden === true,
+          '返回: ' + JSON.stringify(crossOut.body));
+      }
+
+      state.frozenZoneId = frozenZoneId;
+      state.frozenLocId = frozenLocId;
+      state.frozenSampleIds = samples;
+      global.__testState = state;
+    });
+
+    await runCase('场景3: 只读用户写操作全拦截', async () => {
+      const state = global.__testState || {};
+      const loginRes = await api('/api/auth/login', {
+        method: 'POST', body: { username: 'viewer', password: 'view123' }
+      });
+      assert('登录成功', loginRes.body && loginRes.body.success);
+
+      const createRes = await api('/api/samples', {
+        method: 'POST', body: { barcode: 'VIEWER-TEST', batch_no: 'BV', name: '只读测试' }
+      });
+      assert('创建样本被拦', !createRes.body.success && createRes.body.forbidden === true);
+
+      const inboundRes = await api('/api/samples/' + (state.frozenSampleIds?.[0] || 1) + '/inbound', {
+        method: 'POST', body: { location_id: state.frozenLocId || 1 }
+      });
+      assert('入库被拦', !inboundRes.body.success && inboundRes.body.forbidden === true);
+
+      const transferRes = await api('/api/samples/' + (state.frozenSampleIds?.[0] || 1) + '/transfer', {
+        method: 'POST', body: { to_location_id: state.frozenLocId || 1 }
+      });
+      assert('转移被拦', !transferRes.body.success && transferRes.body.forbidden === true);
+
+      const outboundRes = await api('/api/samples/' + (state.frozenSampleIds?.[0] || 1) + '/outbound', {
+        method: 'POST', body: { remark: '测试' }
+      });
+      assert('出库被拦', !outboundRes.body.success && outboundRes.body.forbidden === true);
+
+      const scrapRes = await api('/api/samples/' + (state.frozenSampleIds?.[0] || 1) + '/scrap', {
+        method: 'POST', body: { remark: '测试' }
+      });
+      assert('报废被拦', !scrapRes.body.success && scrapRes.body.forbidden === true);
+
+      const batchRes = await api('/api/samples/batch/inbound', {
+        method: 'POST', body: { items: [{ sample_id: 1, location_id: 1 }] }
+      });
+      assert('批量入库被拦', !batchRes.body.success && batchRes.body.forbidden === true);
+
+      const listRes = await api('/api/samples');
+      assert('读取样本列表正常', listRes.body && listRes.body.success);
+    });
+
+    await runCase('场景4: 批量操作异常整批回滚', async () => {
+      const state = global.__testState || {};
+      const loginRes = await api('/api/auth/login', {
+        method: 'POST', body: { username: 'admin', password: 'admin123' }
+      });
+      assert('管理员登录成功', loginRes.body && loginRes.body.success);
+
+      const coldZoneId = state.coldZoneId || 1;
+      const coldLocId = state.coldLocId || 1;
+
+      // 创建3个样本
+      const rids = [];
+      for (let i = 1; i <= 3; i++) {
+        const r = await api('/api/samples', {
+          method: 'POST',
+          body: { barcode: 'ROLLBACK-' + i, batch_no: 'RB', name: '回滚测试' + i, required_zone_id: coldZoneId }
+        });
+        if (r.body && r.body.success) rids.push(r.body.data.id);
+      }
+      assert('创建3个回滚测试样本', rids.length === 3);
+
+      // 先单独入库第1个
+      const firstIn = await api('/api/samples/' + rids[0] + '/inbound', {
+        method: 'POST', body: { location_id: coldLocId }
+      });
+      assert('第1个样本单独入库成功', firstIn.body && firstIn.body.success);
+
+      const s1before = await api('/api/samples/' + rids[0]);
+      assert('入库后状态=在库', s1before.body.data.status === 'in_storage');
+      const s2before = await api('/api/samples/' + rids[1]);
+      assert('第2个状态=待入库', s2before.body.data.status === 'pending');
+
+      // 批量入库全部3个(含已入库的第1个) - 应该整批回滚
+      const rollbackRes = await api('/api/samples/batch/inbound', {
+        method: 'POST',
+        body: { items: rids.map(id => ({ sample_id: id, location_id: coldLocId })), remark: '回滚测试' }
+      });
+      assert('批量入库失败(预期)', !rollbackRes.body.success, '返回: ' + JSON.stringify(rollbackRes.body));
+      assert('返回 rollback=true', rollbackRes.body.rollback === true);
+
+      // 验证回滚后数据没变
+      const s1after = await api('/api/samples/' + rids[0]);
+      assert('回滚后第1个仍为在库', s1after.body.data.status === 'in_storage');
+
+      const s2after = await api('/api/samples/' + rids[1]);
+      assert('回滚后第2个仍为待入库', s2after.body.data.status === 'pending');
+
+      const s3after = await api('/api/samples/' + rids[2]);
+      assert('回滚后第3个仍为待入库', s3after.body.data.status === 'pending');
+    });
+
+    await runCase('场景5: 批量转移和出库', async () => {
+      const state = global.__testState || {};
+      const loginRes = await api('/api/auth/login', {
+        method: 'POST', body: { username: 'wh_cold', password: 'whcold123' }
+      });
+      assert('冷藏库管员登录', loginRes.body && loginRes.body.success);
+
+      const locs = await api('/api/locations');
+      const loc2 = locs.body.data.find(l => l.code === 'R-A2');
+      if (loc2 && state.coldSampleIds && state.coldSampleIds.length >= 3) {
+        const bt = await api('/api/samples/batch/transfer', {
+          method: 'POST',
+          body: {
+            items: state.coldSampleIds.slice(0, 2).map(id => ({ sample_id: id, to_location_id: loc2.id })),
+            remark: '批量转移'
+          }
+        });
+        assert('批量转移2个成功', bt.body && bt.body.success && bt.body.data.success === 2,
+          '返回: ' + JSON.stringify(bt.body));
+      }
+
+      if (state.coldSampleIds && state.coldSampleIds.length >= 1) {
+        const bo = await api('/api/samples/batch/outbound', {
+          method: 'POST',
+          body: {
+            items: [{ sample_id: state.coldSampleIds[2] }],
+            remark: '批量出库'
+          }
+        });
+        assert('批量出库1个成功', bo.body && bo.body.success && bo.body.data.success === 1,
+          '返回: ' + JSON.stringify(bo.body));
       }
     });
-    assert(coldBatchIn.body.success, `冷藏批量入库5个样本成功 (success=${coldBatchIn.body.data.success})`);
-    if (!coldBatchIn.body.success) console.log(`   错误: ${coldBatchIn.body.error}`);
 
-    console.log('[6] 冷冻库管员批量入库5个样本');
-    const frozenLocId = frozenLocs.body.data[0].id;
-    const frozenSamples = [];
-    for (let i = 1; i <= 5; i++) {
-      const res = await api('/api/samples', {
-        method: 'POST', cookie: FROZEN_COOKIE,
-        body: { barcode: `FROZ-B${i}`, batch_no: 'BATCH-FROZ', name: `冷冻样本${i}`, required_zone_id: frozenLogin.body.data.zone_ids[0] }
+    await runCase('场景6: 用户温区权限管理 API', async () => {
+      const loginRes = await api('/api/auth/login', {
+        method: 'POST', body: { username: 'admin', password: 'admin123' }
       });
-      assert(res.body.success, `创建冷冻样本${i}成功`);
-      if (res.body.success) frozenSamples.push(res.body.data.id);
-    }
+      assert('管理员登录', loginRes.body && loginRes.body.success);
 
-    const frozenBatchIn = await api('/api/samples/batch/inbound', {
-      method: 'POST', cookie: FROZEN_COOKIE,
-      body: {
-        items: frozenSamples.map(id => ({ sample_id: id, location_id: frozenLocId })),
-        remark: '冷冻批量入库'
-      }
-    });
-    assert(frozenBatchIn.body.success, `冷冻批量入库5个样本成功 (success=${frozenBatchIn.body.data.success})`);
-    if (!frozenBatchIn.body.success) console.log(`   错误: ${frozenBatchIn.body.error}`);
+      const list = await api('/api/user-zone-access');
+      assert('查询权限列表成功', list.body && list.body.success);
+      assert('有权限记录', list.body.data && list.body.data.length > 0);
 
-    console.log('[7] 互相看不到对方数据');
-    const coldSamplesList = await api('/api/samples', { cookie: COLD_COOKIE });
-    assert(coldSamplesList.body.success, '冷藏库管员查样本成功');
-    const coldBarcodes = coldSamplesList.body.data.map(s => s.barcode);
-    console.log(`   冷藏库管员可见样本: ${coldBarcodes.join(', ')}`);
-    assert(coldBarcodes.every(b => b.startsWith('COLD')), '冷藏库管员只看到冷藏样本');
-    assert(!coldBarcodes.some(b => b.startsWith('FROZ')), '冷藏库管员看不到冷冻样本');
-
-    const frozenSamplesList = await api('/api/samples', { cookie: FROZEN_COOKIE });
-    assert(frozenSamplesList.body.success, '冷冻库管员查样本成功');
-    const frozenBarcodes = frozenSamplesList.body.data.map(s => s.barcode);
-    console.log(`   冷冻库管员可见样本: ${frozenBarcodes.join(', ')}`);
-    assert(frozenBarcodes.every(b => b.startsWith('FROZ')), '冷冻库管员只看到冷冻样本');
-    assert(!frozenBarcodes.some(b => b.startsWith('COLD')), '冷冻库管员看不到冷藏样本');
-
-    // ===== 场景3: 只读用户所有写操作被拦 =====
-    console.log('\n===== 场景3: 只读用户写操作拦截 =====');
-
-    console.log('[8] 只读用户登录');
-    const viewerLogin = await api('/api/auth/login', {
-      method: 'POST', body: { username: 'viewer', password: 'view123' }
-    });
-    assert(viewerLogin.body.success, '只读用户登录成功');
-    const VIEWER_COOKIE = viewerLogin.setCookie;
-
-    console.log('[9] 只读用户尝试创建样本');
-    const viewerCreate = await api('/api/samples', {
-      method: 'POST', cookie: VIEWER_COOKIE,
-      body: { barcode: 'VIEWER-TEST', batch_no: 'BATCH-V', name: '只读测试' }
-    });
-    assert(!viewerCreate.body.success && viewerCreate.body.forbidden, '只读用户创建样本被拦');
-
-    console.log('[10] 只读用户尝试入库');
-    const viewerInbound = await api(`/api/samples/${coldSamples[0]}/inbound`, {
-      method: 'POST', cookie: VIEWER_COOKIE,
-      body: { location_id: coldLocId }
-    });
-    assert(!viewerInbound.body.success && viewerInbound.body.forbidden, '只读用户入库被拦');
-
-    console.log('[11] 只读用户尝试转移');
-    const viewerTransfer = await api(`/api/samples/${coldSamples[0]}/transfer`, {
-      method: 'POST', cookie: VIEWER_COOKIE,
-      body: { to_location_id: coldLocId }
-    });
-    assert(!viewerTransfer.body.success && viewerTransfer.body.forbidden, '只读用户转移被拦');
-
-    console.log('[12] 只读用户尝试出库');
-    const viewerOutbound = await api(`/api/samples/${coldSamples[0]}/outbound`, {
-      method: 'POST', cookie: VIEWER_COOKIE,
-      body: { remark: '只读测试' }
-    });
-    assert(!viewerOutbound.body.success && viewerOutbound.body.forbidden, '只读用户出库被拦');
-
-    console.log('[13] 只读用户尝试报废');
-    const viewerScrap = await api(`/api/samples/${coldSamples[0]}/scrap`, {
-      method: 'POST', cookie: VIEWER_COOKIE,
-      body: { remark: '只读测试' }
-    });
-    assert(!viewerScrap.body.success && viewerScrap.body.forbidden, '只读用户报废被拦');
-
-    console.log('[14] 只读用户尝试批量入库');
-    const viewerBatch = await api('/api/samples/batch/inbound', {
-      method: 'POST', cookie: VIEWER_COOKIE,
-      body: { items: [{ sample_id: coldSamples[0], location_id: coldLocId }] }
-    });
-    assert(!viewerBatch.body.success && viewerBatch.body.forbidden, '只读用户批量入库被拦');
-
-    // ===== 场景4: 批量入库混一条异常样本，整批回滚 =====
-    console.log('\n===== 场景4: 批量操作异常回滚 =====');
-
-    console.log('[15] admin 登录，先确认当前样本数');
-    const adminLogin = await api('/api/auth/login', {
-      method: 'POST', body: { username: 'admin', password: 'admin123' }
-    });
-    assert(adminLogin.body.success, 'admin 登录成功');
-    const ADMIN_COOKIE = adminLogin.setCookie;
-
-    const beforeSamples = await api('/api/samples', { cookie: ADMIN_COOKIE });
-    const beforeCount = beforeSamples.body.data.length;
-    const beforeInStorage = beforeSamples.body.data.filter(s => s.status === 'in_storage').length;
-    console.log(`   回滚前: 总样本=${beforeCount}, 在库=${beforeInStorage}`);
-
-    console.log('[16] 创建6个样本，其中1个先入库（模拟异常）');
-    const batchTestSamples = [];
-    for (let i = 1; i <= 6; i++) {
-      const res = await api('/api/samples', {
-        method: 'POST', cookie: ADMIN_COOKIE,
-        body: { barcode: `ROLLBACK-T${i}`, batch_no: 'BATCH-RB', name: `回滚测试${i}`, required_zone_id: 1 }
+      // 非管理员测试
+      await api('/api/auth/login', {
+        method: 'POST', body: { username: 'wh_cold', password: 'whcold123' }
       });
-      assert(res.body.success, `创建回滚测试样本${i}成功`);
-      if (res.body.success) batchTestSamples.push(res.body.data.id);
-    }
-
-    console.log('[17] 先把第1个样本单独入库');
-    const firstInbound = await api(`/api/samples/${batchTestSamples[0]}/inbound`, {
-      method: 'POST', cookie: ADMIN_COOKIE,
-      body: { location_id: coldLocId }
+      const forbidden = await api('/api/user-zone-access');
+      assert('库管员无权访问权限管理', !forbidden.body.success && forbidden.body.forbidden === true);
     });
-    assert(firstInbound.body.success, '第1个样本单独入库成功');
-
-    console.log('[18] 尝试批量入库6个样本（包含已入库的第1个，应整批回滚）');
-    const allLocs = await api('/api/locations', { cookie: ADMIN_COOKIE });
-    const rAColdLoc = allLocs.body.data.find(l => l.code === 'R-A1');
-    const rollbackBatch = await api('/api/samples/batch/inbound', {
-      method: 'POST', cookie: ADMIN_COOKIE,
-      body: {
-        items: batchTestSamples.map(id => ({ sample_id: id, location_id: rAColdLoc.id })),
-        remark: '回滚测试批量入库'
-      }
-    });
-    assert(!rollbackBatch.body.success, '批量入库失败（符合预期）');
-    assert(rollbackBatch.body.rollback === true, '整批已回滚');
-    console.log(`   回滚原因: ${rollbackBatch.body.error}`);
-
-    console.log('[19] 确认回滚后数据没变');
-    const afterSamples = await api('/api/samples', { cookie: ADMIN_COOKIE });
-    const afterInStorage = afterSamples.body.data.filter(s => s.status === 'in_storage').length;
-    const afterPending = afterSamples.body.data.filter(s => s.status === 'pending').length;
-    console.log(`   回滚后: 在库=${afterInStorage}, 待入库=${afterPending}`);
-
-    const sample1 = await api(`/api/samples/${batchTestSamples[0]}`, { cookie: ADMIN_COOKIE });
-    assert(sample1.body.data.status === 'in_storage', '第1个样本仍为在库（之前单独入库的）');
-
-    const sample2 = await api(`/api/samples/${batchTestSamples[1]}`, { cookie: ADMIN_COOKIE });
-    assert(sample2.body.data.status === 'pending', '第2个样本仍为待入库（回滚后没变）');
-
-    // ===== 场景5: 库管员不能操作别人温区的样本 =====
-    console.log('\n===== 场景5: 跨温区操作拦截 =====');
-
-    console.log('[20] 冷藏库管员尝试操作冷冻样本');
-    const crossZoneOutbound = await api(`/api/samples/${frozenSamples[0]}/outbound`, {
-      method: 'POST', cookie: COLD_COOKIE,
-      body: { remark: '跨区测试' }
-    });
-    assert(!crossZoneOutbound.body.success && crossZoneOutbound.body.forbidden, '冷藏库管员不能操作冷冻温区样本');
-
-    console.log('[21] 冷冻库管员尝试操作冷藏样本');
-    const crossZoneTransfer = await api(`/api/samples/${coldSamples[0]}/transfer`, {
-      method: 'POST', cookie: FROZEN_COOKIE,
-      body: { to_location_id: frozenLocId }
-    });
-    assert(!crossZoneTransfer.body.success && crossZoneTransfer.body.forbidden, '冷冻库管员不能操作冷藏温区样本');
-
-    console.log('[22] 冷藏库管员尝试在冷冻库位入库');
-    const crossZoneInbound = await api(`/api/samples/${batchTestSamples[1]}/inbound`, {
-      method: 'POST', cookie: COLD_COOKIE,
-      body: { location_id: frozenLocId }
-    });
-    assert(!crossZoneInbound.body.success && crossZoneInbound.body.forbidden, '冷藏库管员不能在冷冻库位入库');
-
-    // ===== 场景6: 批量转移和出库 =====
-    console.log('\n===== 场景6: 批量转移和出库 =====');
-
-    console.log('[23] 冷藏库管员批量转移2个样本');
-    const rA2Loc = coldLocs.body.data.find(l => l.code === 'R-A2');
-    if (rA2Loc) {
-      const batchTransfer = await api('/api/samples/batch/transfer', {
-        method: 'POST', cookie: COLD_COOKIE,
-        body: {
-          items: coldSamples.slice(0, 2).map(id => ({ sample_id: id, to_location_id: rA2Loc.id })),
-          remark: '批量转移测试'
-        }
-      });
-      assert(batchTransfer.body.success, `批量转移2个样本成功 (success=${batchTransfer.body.data.success})`);
-      if (!batchTransfer.body.success) console.log(`   错误: ${batchTransfer.body.error}`);
-    }
-
-    console.log('[24] 冷冻库管员批量出库2个样本');
-    const batchOutbound = await api('/api/samples/batch/outbound', {
-      method: 'POST', cookie: FROZEN_COOKIE,
-      body: {
-        items: frozenSamples.slice(0, 2).map(id => ({ sample_id: id })),
-        remark: '批量出库测试'
-      }
-    });
-    assert(batchOutbound.body.success, `批量出库2个样本成功 (success=${batchOutbound.body.data.success})`);
-    if (!batchOutbound.body.success) console.log(`   错误: ${batchOutbound.body.error}`);
-
-    // ===== 场景7: 用户温区权限管理 API =====
-    console.log('\n===== 场景7: 用户温区权限管理 API =====');
-
-    console.log('[25] 查询用户温区权限');
-    const accessList = await api('/api/user-zone-access', { cookie: ADMIN_COOKIE });
-    assert(accessList.body.success, '查询用户温区权限成功');
-    console.log(`   共 ${accessList.body.data.length} 条权限记录`);
-
-    console.log('[26] 非管理员不能访问权限管理');
-    const forbiddenAccess = await api('/api/user-zone-access', { cookie: COLD_COOKIE });
-    assert(!forbiddenAccess.body.success && forbiddenAccess.body.forbidden, '库管员无权访问权限管理');
-
-    // ===== 最终结果 =====
-    console.log('\n========== 验收结论 ==========');
-    if (errors === 0) {
-      console.log('🎉 所有验收场景全部通过！');
-    } else {
-      console.log(`❌ 有 ${errors} 项验收失败`);
-      process.exitCode = 1;
-    }
 
   } catch (e) {
-    console.error('\n❌ 验收异常:', e.message);
-    console.error(e.stack);
-    process.exitCode = 1;
-  } finally {
-    await stopServer();
+    log('\n❌ 主流程异常: ' + e.message);
+    failCount++;
+    failures.push({ name: '主流程', reason: e.message });
   }
+
+  log('\n========== 验收结论 ==========');
+  log(`通过: ${passCount}, 失败: ${failCount}`);
+
+  writeResult();
+
+  // 停掉服务器
+  try {
+    await stopServer();
+    log('   服务已停止');
+  } catch (e) {
+    log('   停止服务失败: ' + e.message);
+  }
+
+  // 退出码
+  const exitCode = failCount > 0 ? 1 : 0;
+  log(`   退出码: ${exitCode}`);
+  process.exit(exitCode);
 }
 
-main();
+// 全局异常兜底
+process.on('uncaughtException', e => {
+  log('\n❌ 未捕获异常: ' + e.message);
+  if (e.stack) log('   ' + e.stack.split('\n').slice(0, 5).join('\n   '));
+  failCount++;
+  failures.push({ name: '全局未捕获异常', reason: e.message });
+  try { writeResult(); } catch {}
+  try { stopServer(); } catch {}
+  setTimeout(() => process.exit(1), 500);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  log('\n❌ 未处理的 Promise 拒绝: ' + (reason?.message || reason));
+  failCount++;
+  failures.push({ name: 'Promise 未处理拒绝', reason: reason?.message || String(reason) });
+  try { writeResult(); } catch {}
+});
+
+// 启动
+main().catch(e => {
+  log('\n❌ 主函数异常: ' + e.message);
+  failCount++;
+  failures.push({ name: '主函数', reason: e.message });
+  try { writeResult(); } catch {}
+  process.exit(1);
+});

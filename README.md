@@ -26,8 +26,10 @@
 
 | 用户名 | 密码 | 角色 | 权限说明 |
 |--------|------|------|----------|
-| `admin` | `admin123` | **管理员** | 所有操作：样本CRUD、盘点、差异处理、操作撤销 |
+| `admin` | `admin123` | **管理员** | 所有操作：样本CRUD、盘点、差异处理、操作撤销、权限管理 |
 | `warehouse` | `wh123` | **库管员** | 样本入库/转移/出库、发起盘点、**不能处理差异、不能撤销** |
+| `wh_cold` | `whcold123` | **库管员（冷藏）** | 仅操作**冷藏温区**内的样本和库位，其他温区不可见 |
+| `wh_frozen` | `whfrozen123` | **库管员（冷冻）** | 仅操作**冷冻温区**内的样本和库位，其他温区不可见 |
 | `viewer` | `view123` | **只读用户** | 只能查看，不能做任何修改 |
 
 ---
@@ -257,6 +259,43 @@ curl -b cookies.txt -X POST http://localhost:3000/api/samples/$SID5/outbound ^
   -d "{\"remark\":\"用完\"}"
 ```
 
+### 1.5 批量操作（入库/转移/出库）
+
+> ⚠️ **整批校验，一条不过全部回滚**。每条操作单独记 audit_log 和 timeline。
+
+```bash
+# ---------- 批量入库 ----------
+# 5 个样本同时入库到同一个库位，任一校验失败则全部回滚
+curl -b cookies.txt -X POST http://localhost:3000/api/samples/batch/inbound ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[
+    {\"sample_id\":1,\"location_id\":1},
+    {\"sample_id\":2,\"location_id\":1},
+    {\"sample_id\":3,\"location_id\":1},
+    {\"sample_id\":4,\"location_id\":1},
+    {\"sample_id\":5,\"location_id\":1}
+  ],\"remark\":\"批量入库-R-A1\"}"
+# 返回: { success: true, data: { success: 5, failed: 0, errors: [] } }
+# 失败返回: { success: false, error: "第3条: 样本已在库...", rollback: true, data: { success: 2, failed: 3, errors: [...] } }
+
+# ---------- 批量转移 ----------
+curl -b cookies.txt -X POST http://localhost:3000/api/samples/batch/transfer ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[
+    {\"sample_id\":1,\"to_location_id\":2},
+    {\"sample_id\":2,\"to_location_id\":2}
+  ],\"remark\":\"移库整理\"}"
+
+# ---------- 批量出库 ----------
+curl -b cookies.txt -X POST http://localhost:3000/api/samples/batch/outbound ^
+  -H "Content-Type: application/json" ^
+  -d "{\"items\":[
+    {\"sample_id\":1},
+    {\"sample_id\":2},
+    {\"sample_id\":3}
+  ],\"remark\":\"实验用完\"}"
+```
+
 ### 2. 盘点管理
 
 ```bash
@@ -422,3 +461,69 @@ curl -b cookies.txt "http://localhost:3000/api/history/search?inventory_order_id
 - F-B1 / F-B2（冷冻区，容量15）
 - D-C1（深冻区，容量10）
 - N-D1（常温区，容量30）
+
+---
+
+## 温区权限控制（user_zone_access）
+
+系统通过 `user_zone_access` 表实现库管员的温区级别权限隔离：
+
+- **管理员（admin）**：不受限制，可操作所有温区的样本和库位
+- **库管员（warehouse）**：只能查看和操作自己绑定温区内的样本与库位，跨温区操作会被拦截
+- **只读用户（viewer）**：可查看数据，所有写操作被拦截
+
+**权限作用范围**：
+
+| 操作 | 管理员 | 绑定温区的库管员 | 只读用户 |
+|------|--------|------------------|----------|
+| 查看样本/库位/盘点 | 全部 | 仅绑定温区 | 仅绑定温区（无绑定则全看） |
+| 样本入库/转移/出库/报废 | ✅ | 仅绑定温区内的 | ❌ |
+| 批量入库/转移/出库 | ✅ | 仅绑定温区内的 | ❌ |
+| 创建盘点单 | ✅ | 仅绑定温区的 | ❌ |
+| 处理差异/撤销操作 | ✅ | ❌ | ❌ |
+| 权限管理 | ✅ | ❌ | ❌ |
+
+**API 接口**：
+
+```bash
+# 查询用户温区权限（管理员）
+curl -b cookies.txt http://localhost:3000/api/user-zone-access
+
+# 按用户筛选
+curl -b cookies.txt "http://localhost:3000/api/user-zone-access?user_id=5"
+
+# 给用户添加温区权限（管理员）
+curl -b cookies.txt -X POST http://localhost:3000/api/user-zone-access ^
+  -H "Content-Type: application/json" ^
+  -d "{\"user_id\":5,\"zone_id\":1}"
+
+# 删除权限记录（管理员）
+curl -b cookies.txt -X DELETE http://localhost:3000/api/user-zone-access/1
+```
+
+---
+
+## 附录：数据库建表语句
+
+```sql
+-- 温区权限控制表
+CREATE TABLE IF NOT EXISTS user_zone_access (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,        -- 关联 users.id
+  zone_id INTEGER NOT NULL,        -- 关联 temperature_zones.id
+  created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  UNIQUE(user_id, zone_id)         -- 同一用户不能重复绑定同一温区
+);
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_user_zone_access_user ON user_zone_access(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_zone_access_zone ON user_zone_access(zone_id);
+```
+
+**预置绑定**：
+
+| 用户 | 绑定温区 |
+|------|----------|
+| warehouse | 冷藏、冷冻、深冻、常温（全部） |
+| wh_cold | 冷藏(2-8℃) |
+| wh_frozen | 冷冻(-20℃) |
