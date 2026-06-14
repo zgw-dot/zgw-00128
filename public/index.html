@@ -834,11 +834,68 @@ function doImport() {
   const body = { rows, operator: document.getElementById('import-operator').value || 'system' };
   api('/api/samples/import/csv', { method: 'POST', body }).then(res => {
     if (res.success) {
-      alertMsg(`导入完成: 成功${res.data.success}条，失败${res.data.failed}条${res.data.errors.length ? '，详见控制台' : ''}`);
-      if (res.data.errors.length) console.warn('导入失败明细:', res.data.errors);
+      const errCount = (res.data && res.data.errors && res.data.errors.length) || 0;
+      alertMsg(`导入完成: 成功${res.data.success}条，失败${res.data.failed}条${errCount ? '，详见控制台' : ''}`);
+      if (errCount) console.warn('导入失败明细:', res.data.errors);
       closeModal(); loadSamples(); loadDashboard();
-    } else alertMsg(res.error, 'error');
+      return;
+    }
+    const errors = (res.data && (res.data.errors || res.data.results)) || [];
+    if (errors && errors.length > 0) {
+      showImportFailureModal(res.error, errors, res.data);
+    } else {
+      alertMsg(res.error || '导入失败', 'error');
+    }
   });
+}
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function showImportFailureModal(topError, errors, data) {
+  const failedCount = errors.length;
+  const total = (data && data.total) || failedCount;
+  const esc = escapeHtml;
+  const rowsHtml = errors.map(e => {
+    const row = e.row_number != null ? e.row_number : '-';
+    const bc = e.barcode || e.barcode_no || '(空)';
+    const bn = e.batch_no || e.batch || '-';
+    const reason = e.failure_reason || e.error || e.reason || '未知错误';
+    return `<tr>
+      <td style="text-align:center;padding:8px 12px;border-bottom:1px solid #e5e7eb;">${esc(row)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${esc(bc)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${esc(bn)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#b91c1c;">${esc(reason)}</td>
+    </tr>`;
+  }).join('');
+  const table = `<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:10px;">
+    <thead>
+      <tr style="background:#f9fafb;">
+        <th style="text-align:left;padding:8px 12px;border-bottom:2px solid #e5e7eb;width:70px;">行号</th>
+        <th style="text-align:left;padding:8px 12px;border-bottom:2px solid #e5e7eb;">条码</th>
+        <th style="text-align:left;padding:8px 12px;border-bottom:2px solid #e5e7eb;">批次</th>
+        <th style="text-align:left;padding:8px 12px;border-bottom:2px solid #e5e7eb;">失败原因</th>
+      </tr>
+    </thead>
+    <tbody>${rowsHtml}</tbody>
+  </table>`;
+  const exportCsvBtn = (data && data.batch_id) ?
+    `<button class="btn btn-secondary" onclick="window.location.href='/api/samples/import/batches/${data.batch_id}/export/csv'">导出失败明细CSV</button>` :
+    '';
+  showModal(`
+    <h3 style="margin-bottom:6px;">批量导入失败</h3>
+    <div class="alert alert-error" style="margin-bottom:10px;">
+      <strong>整批已回滚，未新增任何样本</strong><br>
+      共 ${esc(String(total))} 条，失败 <strong style="color:#b91c1c;">${esc(String(failedCount))}</strong> 条。
+      ${esc(topError || '')}
+    </div>
+    ${table}
+    <div class="modal-actions" style="margin-top:16px;">
+      ${exportCsvBtn}
+      <button class="btn btn-secondary" onclick="showImportModal()">返回重试</button>
+      <button class="btn btn-primary" onclick="closeModal()">关闭</button>
+    </div>
+  `);
 }
 
 // ---------- 配置 ----------
