@@ -267,15 +267,29 @@ curl -b cookies.txt -X POST http://localhost:3000/api/inventory ^
 # ↑ 返回的 data.id 就是盘点单 ID，记为 $INV_ID
 
 # 2.2 导入扫码 CSV（制造 5 种冲突）
+# ⚠️ 有两种导入方式，字段名千万别写错！
+#   方式A（CSV 文本）：传 csv_text，列头模糊匹配（含"条码/库位/时间"即可）
+#   方式B（JSON 数组）：传 rows，每个对象必须有 barcode + scanned_location_code/location_code
+#                      （不能写 location！server.js 只认 scanned_location_code 或 location_code）
+
+# ------------- 方式 A：CSV 文本 -------------
+curl -b cookies.txt -X POST http://localhost:3000/api/inventory/$INV_ID/import ^
+  -H "Content-Type: application/json" ^
+  -d "{\"csv_text\":\"条码,库位,扫描时间\n验收-S1,R-A1,2024-06-15 09:00:00\n验收-S2,R-A1,2024-06-15 09:01:00\n验收-S3,R-A2,2024-06-15 09:02:00\n验收-S5,R-A1,2024-06-15 09:03:00\n验收-EXTRA,R-A1,2024-06-15 09:04:00\"}"
+
+# ------------- 方式 B：JSON rows（推荐，字段明确）-------------
+# ⚠️ 关键字段：scanned_location_code（或 location_code），写 location 会被忽略！
 curl -b cookies.txt -X POST http://localhost:3000/api/inventory/$INV_ID/import ^
   -H "Content-Type: application/json" ^
   -d "{\"rows\":[
-    {\"barcode\":\"验收-S1\",\"location\":\"R-A1\",\"scan_time\":\"2024-06-15 09:00:00\"},
-    {\"barcode\":\"验收-S2\",\"location\":\"R-A1\",\"scan_time\":\"2024-06-15 09:01:00\"},
-    {\"barcode\":\"验收-S3\",\"location\":\"R-A1\",\"scan_time\":\"2024-06-15 09:02:00\"},
-    {\"barcode\":\"验收-S5\",\"location\":\"R-A1\",\"scan_time\":\"2024-06-15 09:03:00\"},
-    {\"barcode\":\"验收-EXTRA\",\"location\":\"R-A1\",\"scan_time\":\"2024-06-15 09:04:00\"}
+    {\"barcode\":\"验收-S1\",\"scanned_location_code\":\"R-A1\",\"scan_time\":\"2024-06-15 09:00:00\"},
+    {\"barcode\":\"验收-S2\",\"scanned_location_code\":\"R-A1\",\"scan_time\":\"2024-06-15 09:01:00\"},
+    {\"barcode\":\"验收-S3\",\"scanned_location_code\":\"R-A2\",\"scan_time\":\"2024-06-15 09:02:00\"},
+    {\"barcode\":\"验收-S5\",\"scanned_location_code\":\"R-A1\",\"scan_time\":\"2024-06-15 09:03:00\"},
+    {\"barcode\":\"验收-EXTRA\",\"scanned_location_code\":\"R-A1\",\"scan_time\":\"2024-06-15 09:04:00\"}
   ]}"
+#  ↑ S3 台账在 R-A1，扫码写 R-A2 → 触发 mislocated（库位不一致）
+#  ↑ 要是写成 location:"R-A2" 就没这效果，scanned_location_code 会是空串
 
 # 2.3 看盘点详情 + 差异统计
 curl -b cookies.txt http://localhost:3000/api/inventory/$INV_ID

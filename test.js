@@ -125,10 +125,17 @@ async function createInventory(title, type, zone_id = null, location_id = null) 
   });
 }
 
-async function importScan(inventoryId, csvText) {
-  return request(`/api/inventory/${inventoryId}/import`, {
+async function importScan(orderId, csvText) {
+  return request(`/api/inventory/${orderId}/import`, {
     method: 'POST',
     body: { csv_text: csvText }
+  });
+}
+
+async function importScanJson(orderId, rows) {
+  return request(`/api/inventory/${orderId}/import`, {
+    method: 'POST',
+    body: { rows }
   });
 }
 
@@ -227,6 +234,19 @@ async function runTests() {
   console.log('  冷链样本追踪系统 - 盘点与纠错测试');
   console.log(`  运行标识: ${RUN_ID}`);
   console.log('========================================\n');
+
+  // ===== 0. viewer 只读用户登录（验证补建账号成功）
+  await test('0. viewer 只读用户登录（验证账号补建成功）', async () => {
+    await logout();
+    const res = await login('viewer', 'view123');
+    assert(res.success, `viewer 登录失败: ${res.error}`);
+    assert(res.data.role === 'viewer', `角色应为 viewer，实际 ${res.data.role}`);
+    assert(res.data.role_label === '只读用户',
+      `role_label 应为 只读用户，实际 ${res.data.role_label}`);
+    console.log('   用户:', res.data.username, '角色:', res.data.role_label);
+    // 登出 viewer，后续用管理员
+    await logout();
+  })();
 
   // ===== 1. 管理员登录
   await test('1. 管理员登录', async () => {
@@ -370,6 +390,37 @@ ${BARCODES.EXTRA},${MC},2024-06-15 09:04:00`;
     assert(o.total_outbound_scanned >= 1, `已出库被扫应>=1，实际${o.total_outbound_scanned} ← S5已出库却被扫`);
     assert(o.total_missing >= 1, `漏扫应>=1，实际${o.total_missing} ← S4应被漏扫`);
     assert(o.total_matched >= 2, `匹配应>=2，实际${o.total_matched} ← S1,S2应匹配`);
+  })();
+
+  // ===== 7.5 JSON rows 方式导入（覆盖原数据，验证 scanned_location_code 字段生效）
+  await test('7.5 JSON rows 导入（字段对齐 scanned_location_code，mislocated 仍有效）', async () => {
+    const MC = LOC_MAIN.code;
+    const AC = LOC_ALT.code;
+    // 注意：字段名必须是 scanned_location_code（或 location_code），不能写 location（会被丢弃为空串）
+    const rows = [
+      { barcode: BARCODES.S1, scanned_location_code: MC, scan_time: '2024-06-15 09:00:00' },
+      { barcode: BARCODES.S2, scanned_location_code: MC, scan_time: '2024-06-15 09:01:00' },
+      { barcode: BARCODES.S3, scanned_location_code: AC, scan_time: '2024-06-15 09:02:00' },
+      { barcode: BARCODES.S5, scanned_location_code: MC, scan_time: '2024-06-15 09:03:00' },
+      { barcode: BARCODES.EXTRA, scanned_location_code: MC, scan_time: '2024-06-15 09:04:00' }
+    ];
+
+    const res = await importScanJson(state.inventoryOrderId, rows);
+    assert(res.success, `JSON rows 导入失败: ${res.error}`);
+    console.log('   JSON rows 导入成功:', res.data.imported, '条');
+    const o = res.data.order;
+    console.log('   统计: 期望', o.total_expected,
+      '扫描', o.total_scanned,
+      '库位不一致', o.total_mislocated,
+      '多扫', o.total_extra,
+      '已出库被扫', o.total_outbound_scanned);
+
+    // 关键点：scanned_location_code 必须被正确读取，S3 才能判定 mislocated
+    assert(o.total_scanned === 5, `JSON rows 扫描数应为5，实际${o.total_scanned}`);
+    assert(o.total_mislocated >= 1,
+      `JSON rows 库位不一致应>=1，实际${o.total_mislocated} ← scanned_location_code 没被正确读取！`);
+    assert(o.total_extra >= 1, `JSON rows 多扫应>=1，实际${o.total_extra}`);
+    assert(o.total_outbound_scanned >= 1, `JSON rows 已出库被扫应>=1，实际${o.total_outbound_scanned}`);
   })();
 
   // ===== 8. 获取盘点差异列表，保存差异 ID（按条码存，防止同type被历史数据覆盖）

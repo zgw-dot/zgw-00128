@@ -220,12 +220,19 @@ async function initDatabase() {
     db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('N-D1', '常温区D架1层', ${zoneMap['常温(15-25℃)']}, 30, '常温库位')`);
   }
 
-  const userCount = db.exec('SELECT COUNT(*) as cnt FROM users')[0].values[0][0];
-  if (userCount === 0) {
-    db.run(`INSERT INTO users (username, password, role, real_name) VALUES ('admin', 'admin123', 'admin', '系统管理员')`);
-    db.run(`INSERT INTO users (username, password, role, real_name) VALUES ('warehouse', 'wh123', 'warehouse', '仓库管理员')`);
-    db.run(`INSERT INTO users (username, password, role, real_name) VALUES ('manager', 'mgr123', 'admin', '部门经理')`);
+  // 每个用户单独检查（用 INSERT OR IGNORE 语义），新老数据库都能补齐缺失账号
+  function ensureUser(username, password, role, real_name) {
+    const cnt = db.exec(`SELECT COUNT(*) as cnt FROM users WHERE username='${username}'`)[0].values[0][0];
+    if (cnt !== 0) return; // 已存在就跳过
+    db.run(
+      `INSERT INTO users (username, password, role, real_name) VALUES (?, ?, ?, ?)`,
+      [username, password, role, real_name]
+    );
   }
+  ensureUser('admin', 'admin123', 'admin', '系统管理员');
+  ensureUser('warehouse', 'wh123', 'warehouse', '仓库管理员');
+  ensureUser('manager', 'mgr123', 'admin', '部门经理');
+  ensureUser('viewer', 'view123', 'viewer', '只读用户');
 
   saveDatabase();
 }

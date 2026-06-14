@@ -55,7 +55,8 @@ const DISCREPANCY_STATUS_LABELS = {
 
 const ROLE_LABELS = {
   admin: '管理员',
-  warehouse: '库管员'
+  warehouse: '库管员',
+  viewer: '只读用户'
 };
 
 let currentUser = null;
