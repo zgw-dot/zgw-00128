@@ -197,6 +197,16 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS user_zone_access (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      zone_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      UNIQUE(user_id, zone_id)
+    )
+  `);
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_barcode ON samples(barcode)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_status ON samples(status)`);
@@ -217,6 +227,8 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action_type)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_object ON audit_log(object_type, object_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_user_zone_access_user ON user_zone_access(user_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_user_zone_access_zone ON user_zone_access(zone_id)`);
   } catch(e) {}
 
   const zoneCount = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones')[0].values[0][0];
@@ -253,6 +265,31 @@ async function initDatabase() {
   ensureUser('warehouse', 'wh123', 'warehouse', '仓库管理员');
   ensureUser('manager', 'mgr123', 'admin', '部门经理');
   ensureUser('viewer', 'view123', 'viewer', '只读用户');
+
+  // 初始化两个库管员账号用于验收
+  ensureUser('wh_cold', 'whcold123', 'warehouse', '冷藏库管员');
+  ensureUser('wh_frozen', 'whfrozen123', 'warehouse', '冷冻库管员');
+
+  // 给库管员默认绑定温区（验收场景：冷藏库管员绑冷藏，冷冻库管员绑冷冻）
+  function ensureUserZone(username, zoneName) {
+    const userRow = db.exec(`SELECT id FROM users WHERE username='${username}'`);
+    if (!userRow || userRow[0].values.length === 0) return;
+    const userId = userRow[0].values[0][0];
+    const zoneRow = db.exec(`SELECT id FROM temperature_zones WHERE name='${zoneName.replace(/'/g, "''")}'`);
+    if (!zoneRow || zoneRow[0].values.length === 0) return;
+    const zoneId = zoneRow[0].values[0][0];
+    const exists = db.exec(`SELECT COUNT(*) as cnt FROM user_zone_access WHERE user_id=${userId} AND zone_id=${zoneId}`)[0].values[0][0];
+    if (exists === 0) {
+      db.run(`INSERT OR IGNORE INTO user_zone_access (user_id, zone_id) VALUES (${userId}, ${zoneId})`);
+    }
+  }
+  ensureUserZone('wh_cold', '冷藏(2-8℃)');
+  ensureUserZone('wh_frozen', '冷冻(-20℃)');
+  // 默认 warehouse 账号绑所有温区（保持兼容性）
+  ensureUserZone('warehouse', '冷藏(2-8℃)');
+  ensureUserZone('warehouse', '冷冻(-20℃)');
+  ensureUserZone('warehouse', '深冻(-80℃)');
+  ensureUserZone('warehouse', '常温(15-25℃)');
 
   saveDatabase();
 }
@@ -395,6 +432,18 @@ function insertAuditLogInTx(params) {
   ]);
 }
 
+function getUserZoneIds(userId) {
+  if (!userId) return [];
+  const rows = queryAll('SELECT zone_id FROM user_zone_access WHERE user_id = ?', [userId]);
+  return rows.map(r => r.zone_id);
+}
+
+function getUserZoneIdsInTx(userId) {
+  if (!userId) return [];
+  const rows = queryAll('SELECT zone_id FROM user_zone_access WHERE user_id = ?', [userId]);
+  return rows.map(r => r.zone_id);
+}
+
 module.exports = {
   initDatabase,
   queryAll,
@@ -408,5 +457,7 @@ module.exports = {
   rollbackTransaction,
   getLastInsertIdInTx,
   insertAuditLog,
-  insertAuditLogInTx
+  insertAuditLogInTx,
+  getUserZoneIds,
+  getUserZoneIdsInTx
 };

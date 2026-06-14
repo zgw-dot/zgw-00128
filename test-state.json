@@ -1,39 +1,37 @@
 {
-  "runId": "mqd7uy9d09s",
-  "createdAt": "2026-06-14T03:20:12.529Z",
+  "runId": "mqddzg7x0ai",
+  "createdAt": "2026-06-14T06:11:40.125Z",
   "barcodes": {
-    "S1": "INV-mqd7uy9d09s-S1",
-    "S2": "INV-mqd7uy9d09s-S2",
-    "S3": "INV-mqd7uy9d09s-S3",
-    "S4": "INV-mqd7uy9d09s-S4",
-    "S5": "INV-mqd7uy9d09s-S5",
-    "EXTRA": "INV-mqd7uy9d09s-EXTRA",
-    "SCRAP": "INV-mqd7uy9d09s-SCRAP"
+    "S1": "INV-mqddzg7x0ai-S1",
+    "S2": "INV-mqddzg7x0ai-S2",
+    "S3": "INV-mqddzg7x0ai-S3",
+    "S4": "INV-mqddzg7x0ai-S4",
+    "S5": "INV-mqddzg7x0ai-S5",
+    "EXTRA": "INV-mqddzg7x0ai-EXTRA",
+    "SCRAP": "INV-mqddzg7x0ai-SCRAP"
   },
   "batches": {
-    "main": "BATCH-mqd7uy9d09s",
-    "extra": "BATCH-EXTRA-mqd7uy9d09s",
-    "scrap": "BATCH-SCRAP-mqd7uy9d09s"
+    "main": "BATCH-mqddzg7x0ai",
+    "extra": "BATCH-EXTRA-mqddzg7x0ai",
+    "scrap": "BATCH-SCRAP-mqddzg7x0ai"
   },
   "sampleIds": {
-    "S1": 13,
-    "S2": 14,
-    "S3": 15,
-    "S4": 16,
-    "S5": 17,
-    "EXTRA": 18,
-    "SCRAP": 19
+    "S1": 17,
+    "S2": 18,
+    "S3": 19,
+    "S4": 20,
+    "S5": 21
   },
-  "inventoryOrderId": 3,
-  "inventoryOrderNo": "PD202606147987",
+  "inventoryOrderId": 1,
+  "inventoryOrderNo": "PD202606140343",
   "discrepancyIds": {
-    "mislocated": 22,
-    "extra": 24,
-    "missing": 29,
-    "outbound_scanned": 23
+    "mislocated": 8,
+    "extra": 10,
+    "missing": 14,
+    "outbound_scanned": 9
   },
-  "transferTimelineId": 48,
-  "scrapTimelineId": 53,
+  "transferTimelineId": null,
+  "scrapTimelineId": null,
   "locations": {
     "main": {
       "id": 1,
@@ -45,23 +43,21 @@
     }
   },
   "discrepancyIdsByBarcode": {
-    "INV-mqd7uy9d09s-S3": 22,
-    "INV-mqd7uy9d09s-S5": 23,
-    "INV-mqd7uy9d09s-EXTRA": 24,
-    "rvmqd7us29-S1": 25,
-    "rvmqd7us29-S2": 26,
-    "rvmqd7us29-S4": 27,
-    "INV-mqd7uxzk04f-S3": 28,
-    "INV-mqd7uy9d09s-S4": 29
+    "INV-mqddzg7x0ai-S3": 8,
+    "INV-mqddzg7x0ai-S5": 9,
+    "INV-mqddzg7x0ai-EXTRA": 10,
+    "C-3": 11,
+    "C-4": 12,
+    "RB-1": 13,
+    "INV-mqddzg7x0ai-S4": 14
   },
   "discrepancyTypeByBarcode": {
-    "INV-mqd7uy9d09s-S3": "mislocated",
-    "INV-mqd7uy9d09s-S5": "outbound_scanned",
-    "INV-mqd7uy9d09s-EXTRA": "extra",
-    "rvmqd7us29-S1": "missing",
-    "rvmqd7us29-S2": "missing",
-    "rvmqd7us29-S4": "missing",
-    "INV-mqd7uxzk04f-S3": "missing",
-    "INV-mqd7uy9d09s-S4": "missing"
+    "INV-mqddzg7x0ai-S3": "mislocated",
+    "INV-mqddzg7x0ai-S5": "outbound_scanned",
+    "INV-mqddzg7x0ai-EXTRA": "extra",
+    "C-3": "missing",
+    "C-4": "missing",
+    "RB-1": "missing",
+    "INV-mqddzg7x0ai-S4": "missing"
   }
 }

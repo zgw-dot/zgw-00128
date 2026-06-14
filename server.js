@@ -2,7 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
-const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx, insertAuditLog, insertAuditLogInTx } = require('./db');
+const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx, insertAuditLog, insertAuditLogInTx, getUserZoneIds } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -226,6 +226,55 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function requireWrite(req, res, next) {
+  if (!currentUser) {
+    return res.json({ success: false, error: '请先登录', needLogin: true });
+  }
+  if (currentUser.role === 'viewer') {
+    return res.json({ success: false, error: '只读用户无写入权限', forbidden: true });
+  }
+  req.user = currentUser;
+  next();
+}
+
+function getAccessibleZoneIds() {
+  if (!currentUser) return [];
+  if (currentUser.role === 'admin') return null; // null 表示全部可访问
+  return getUserZoneIds(currentUser.id);
+}
+
+function canAccessZone(zoneId) {
+  if (!currentUser) return false;
+  if (currentUser.role === 'admin') return true;
+  if (zoneId == null) return false;
+  const allowed = getUserZoneIds(currentUser.id);
+  return allowed.includes(parseInt(zoneId));
+}
+
+function canAccessLocation(locationId) {
+  if (!currentUser) return false;
+  if (currentUser.role === 'admin') return true;
+  if (!locationId) return false;
+  const loc = queryOne('SELECT zone_id FROM storage_locations WHERE id = ?', [locationId]);
+  if (!loc) return false;
+  return canAccessZone(loc.zone_id);
+}
+
+function canAccessSample(sampleId) {
+  if (!currentUser) return false;
+  if (currentUser.role === 'admin') return true;
+  if (!sampleId) return false;
+  const sample = queryOne('SELECT current_location_id, required_zone_id, status FROM samples WHERE id = ?', [sampleId]);
+  if (!sample) return false;
+  if (sample.current_location_id) {
+    return canAccessLocation(sample.current_location_id);
+  }
+  if (sample.required_zone_id) {
+    return canAccessZone(sample.required_zone_id);
+  }
+  return false;
+}
+
 function generateOrderNo() {
   const now = new Date();
   const dateStr = now.getFullYear().toString() +
@@ -434,7 +483,8 @@ app.post('/api/auth/login', (req, res) => {
     username: user.username,
     role: user.role,
     real_name: user.real_name,
-    role_label: ROLE_LABELS[user.role] || user.role
+    role_label: ROLE_LABELS[user.role] || user.role,
+    zone_ids: getUserZoneIds(user.id)
   };
   addAuditLog(req, 'login', 'user', user.id,
     null,
@@ -468,7 +518,11 @@ app.get('/api/users', requireAdmin, (req, res) => {
 });
 
 app.get('/api/zones', (req, res) => {
-  const zones = queryAll('SELECT * FROM temperature_zones ORDER BY id');
+  const accessibleZones = getAccessibleZoneIds();
+  let zones = queryAll('SELECT * FROM temperature_zones ORDER BY id');
+  if (accessibleZones !== null) {
+    zones = zones.filter(z => accessibleZones.includes(z.id));
+  }
   res.json({ success: true, data: zones });
 });
 
@@ -513,12 +567,23 @@ app.delete('/api/zones/:id', (req, res) => {
 });
 
 app.get('/api/locations', (req, res) => {
-  const locations = queryAll(`
+  const accessibleZones = getAccessibleZoneIds();
+  let sql = `
     SELECT sl.*, tz.name as zone_name, tz.min_temp, tz.max_temp
     FROM storage_locations sl
     LEFT JOIN temperature_zones tz ON sl.zone_id = tz.id
-    ORDER BY sl.code
-  `);
+    WHERE 1=1
+  `;
+  const params = [];
+  if (accessibleZones !== null) {
+    if (accessibleZones.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+    sql += ' AND sl.zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')';
+    params.push(...accessibleZones);
+  }
+  sql += ' ORDER BY sl.code';
+  const locations = queryAll(sql, params);
   locations.forEach(loc => {
     loc.occupancy = getLocationOccupancy(loc.id);
   });
@@ -590,6 +655,15 @@ app.get('/api/samples', (req, res) => {
     sql += ' AND s.status = ?';
     params.push(status);
   }
+  const accessibleZones = getAccessibleZoneIds();
+  if (accessibleZones !== null) {
+    if (accessibleZones.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+    sql += ' AND (s.required_zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')' +
+      ' OR EXISTS (SELECT 1 FROM storage_locations sl2 WHERE sl2.id = s.current_location_id AND sl2.zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')))';
+    params.push(...accessibleZones, ...accessibleZones);
+  }
   sql += ' ORDER BY s.id DESC';
   const samples = queryAll(sql, params);
 
@@ -635,10 +709,13 @@ app.get('/api/samples/:id', (req, res) => {
   res.json({ success: true, data: sample });
 });
 
-app.post('/api/samples', (req, res) => {
+app.post('/api/samples', requireWrite, (req, res) => {
   const { barcode, batch_no, name, required_zone_id, operator } = req.body;
   if (!barcode || !batch_no) {
     return res.json({ success: false, error: '条码和批次号必填' });
+  }
+  if (required_zone_id && !canAccessZone(required_zone_id)) {
+    return res.json({ success: false, error: '无权操作该温区的样本', forbidden: true });
   }
   const existing = queryOne('SELECT id FROM samples WHERE barcode=?', [barcode]);
   if (existing) {
@@ -656,15 +733,185 @@ app.post('/api/samples', (req, res) => {
   }
 });
 
-app.post('/api/samples/:id/inbound', (req, res) => {
+app.post('/api/samples/batch/inbound', requireWrite, (req, res) => {
+  const { items, remark } = req.body;
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.json({ success: false, error: '批量入库数据为空' });
+  }
+  const results = { success: 0, failed: 0, errors: [] };
+  const operator = currentUser.real_name || currentUser.username;
+
+  try {
+    runTransaction(() => {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const { sample_id, location_id } = item;
+
+        if (!sample_id || !location_id) {
+          throw new Error(`第${i + 1}条: sample_id 和 location_id 必填`);
+        }
+
+        if (!canAccessSample(sample_id)) {
+          throw new Error(`第${i + 1}条: 无权操作该样本(样本ID=${sample_id})`);
+        }
+        if (!canAccessLocation(location_id)) {
+          throw new Error(`第${i + 1}条: 无权操作该库位所属温区(库位ID=${location_id})`);
+        }
+
+        const sample = queryOne('SELECT * FROM samples WHERE id=?', [sample_id]);
+        if (!sample) throw new Error(`第${i + 1}条: 样本不存在(ID=${sample_id})`);
+        if (sample.status === 'scrapped') throw new Error(`第${i + 1}条: 样本已报废，无法操作(条码=${sample.barcode})`);
+        if (sample.status === 'in_storage') throw new Error(`第${i + 1}条: 样本已在库，不能重复入库(条码=${sample.barcode})`);
+
+        const loc = getLocationWithZone(location_id);
+        if (!loc) throw new Error(`第${i + 1}条: 库位不存在(ID=${location_id})`);
+
+        const occupancy = getLocationOccupancy(location_id);
+        if (occupancy >= loc.capacity) throw new Error(`第${i + 1}条: 库位已满(库位=${loc.code}, 容量${loc.capacity})`);
+
+        if (sample.required_zone_id && loc.zone_id !== sample.required_zone_id) {
+          throw new Error(`第${i + 1}条: 温区不匹配，样本应放指定温区，当前库位属于${loc.zone_name}(条码=${sample.barcode})`);
+        }
+
+        const beforeSample = { ...sample };
+        runInTx(`UPDATE samples SET status='in_storage', current_location_id=?, updated_at=datetime('now','localtime') WHERE id=?`, [location_id, sample_id]);
+        addTimelineInTx(sample_id, 'inbound', null, location_id, null, remark || '', operator);
+        addAuditLogInTx(req, 'inbound', 'sample', sample_id,
+          { status: beforeSample.status, current_location_id: beforeSample.current_location_id },
+          { status: 'in_storage', current_location_id: location_id, location_code: loc.code },
+          remark || `批量入库到 ${loc.code}`);
+        results.success++;
+      }
+    });
+    res.json({ success: true, data: results });
+  } catch (e) {
+    results.errors.push(e.message);
+    results.failed = items.length - results.success;
+    res.json({ success: false, error: e.message, data: results, rollback: true });
+  }
+});
+
+app.post('/api/samples/batch/transfer', requireWrite, (req, res) => {
+  const { items, remark } = req.body;
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.json({ success: false, error: '批量转移数据为空' });
+  }
+  const results = { success: 0, failed: 0, errors: [] };
+  const operator = currentUser.real_name || currentUser.username;
+
+  try {
+    runTransaction(() => {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const { sample_id, to_location_id } = item;
+
+        if (!sample_id || !to_location_id) {
+          throw new Error(`第${i + 1}条: sample_id 和 to_location_id 必填`);
+        }
+
+        if (!canAccessSample(sample_id)) {
+          throw new Error(`第${i + 1}条: 无权操作该样本(样本ID=${sample_id})`);
+        }
+        if (!canAccessLocation(to_location_id)) {
+          throw new Error(`第${i + 1}条: 无权操作目标库位所属温区(库位ID=${to_location_id})`);
+        }
+
+        const sample = queryOne('SELECT * FROM samples WHERE id=?', [sample_id]);
+        if (!sample) throw new Error(`第${i + 1}条: 样本不存在(ID=${sample_id})`);
+        if (sample.status !== 'in_storage') throw new Error(`第${i + 1}条: 样本不在库中，无法转移(条码=${sample.barcode})`);
+        if (sample.current_location_id === to_location_id) throw new Error(`第${i + 1}条: 目标库位与当前相同(条码=${sample.barcode})`);
+
+        const toLoc = getLocationWithZone(to_location_id);
+        if (!toLoc) throw new Error(`第${i + 1}条: 目标库位不存在(ID=${to_location_id})`);
+
+        const occupancy = getLocationOccupancy(to_location_id);
+        if (occupancy >= toLoc.capacity) throw new Error(`第${i + 1}条: 目标库位已满(库位=${toLoc.code}, 容量${toLoc.capacity})`);
+
+        if (sample.required_zone_id && toLoc.zone_id !== sample.required_zone_id) {
+          throw new Error(`第${i + 1}条: 温区不匹配，目标库位属于${toLoc.zone_name}(条码=${sample.barcode})`);
+        }
+
+        const fromId = sample.current_location_id;
+        const fromLoc = getLocationWithZone(fromId);
+
+        runInTx(`UPDATE samples SET current_location_id=?, updated_at=datetime('now','localtime') WHERE id=?`, [to_location_id, sample_id]);
+        addTimelineInTx(sample_id, 'transfer', fromId, to_location_id, null, remark || '', operator);
+        addAuditLogInTx(req, 'transfer', 'sample', sample_id,
+          { current_location_id: fromId, location_code: fromLoc ? fromLoc.code : null },
+          { current_location_id: to_location_id, location_code: toLoc.code },
+          remark || `批量转移: ${fromLoc ? fromLoc.code : '未知'} → ${toLoc.code}`);
+        results.success++;
+      }
+    });
+    res.json({ success: true, data: results });
+  } catch (e) {
+    results.errors.push(e.message);
+    results.failed = items.length - results.success;
+    res.json({ success: false, error: e.message, data: results, rollback: true });
+  }
+});
+
+app.post('/api/samples/batch/outbound', requireWrite, (req, res) => {
+  const { items, remark } = req.body;
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.json({ success: false, error: '批量出库数据为空' });
+  }
+  const results = { success: 0, failed: 0, errors: [] };
+  const operator = currentUser.real_name || currentUser.username;
+
+  try {
+    runTransaction(() => {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const { sample_id } = item;
+
+        if (!sample_id) {
+          throw new Error(`第${i + 1}条: sample_id 必填`);
+        }
+
+        if (!canAccessSample(sample_id)) {
+          throw new Error(`第${i + 1}条: 无权操作该样本(样本ID=${sample_id})`);
+        }
+
+        const sample = queryOne('SELECT * FROM samples WHERE id=?', [sample_id]);
+        if (!sample) throw new Error(`第${i + 1}条: 样本不存在(ID=${sample_id})`);
+        if (sample.status !== 'in_storage') throw new Error(`第${i + 1}条: 样本未入库或已出库(条码=${sample.barcode})`);
+
+        const fromId = sample.current_location_id;
+        const fromLoc = getLocationWithZone(fromId);
+
+        runInTx(`UPDATE samples SET status='outbound', current_location_id=NULL, updated_at=datetime('now','localtime') WHERE id=?`, [sample_id]);
+        addTimelineInTx(sample_id, 'outbound', fromId, null, null, remark || '', operator);
+        addAuditLogInTx(req, 'outbound', 'sample', sample_id,
+          { status: sample.status, current_location_id: fromId, location_code: fromLoc ? fromLoc.code : null },
+          { status: 'outbound', current_location_id: null },
+          remark || `批量出库: ${fromLoc ? fromLoc.code : '未知'}`);
+        results.success++;
+      }
+    });
+    res.json({ success: true, data: results });
+  } catch (e) {
+    results.errors.push(e.message);
+    results.failed = items.length - results.success;
+    res.json({ success: false, error: e.message, data: results, rollback: true });
+  }
+});
+
+app.post('/api/samples/:id/inbound', requireWrite, (req, res) => {
   const { id } = req.params;
   const { location_id, operator, remark } = req.body;
   if (!location_id) {
     return res.json({ success: false, error: '请选择入库库位' });
   }
+  if (!canAccessLocation(location_id)) {
+    return res.json({ success: false, error: '无权操作该库位所属温区', forbidden: true });
+  }
   const sample = queryOne('SELECT * FROM samples WHERE id=?', [id]);
   if (!sample) {
     return res.json({ success: false, error: '样本不存在' });
+  }
+  if (!canAccessSample(id)) {
+    return res.json({ success: false, error: '无权操作该样本', forbidden: true });
   }
   if (sample.status === 'scrapped') {
     return res.json({ success: false, error: '样本已报废，无法操作' });
@@ -704,15 +951,21 @@ app.post('/api/samples/:id/inbound', (req, res) => {
   }
 });
 
-app.post('/api/samples/:id/transfer', (req, res) => {
+app.post('/api/samples/:id/transfer', requireWrite, (req, res) => {
   const { id } = req.params;
   const { to_location_id, operator, remark } = req.body;
   if (!to_location_id) {
     return res.json({ success: false, error: '请选择目标库位' });
   }
+  if (!canAccessLocation(to_location_id)) {
+    return res.json({ success: false, error: '无权操作目标库位所属温区', forbidden: true });
+  }
   const sample = queryOne('SELECT * FROM samples WHERE id=?', [id]);
   if (!sample) {
     return res.json({ success: false, error: '样本不存在' });
+  }
+  if (!canAccessSample(id)) {
+    return res.json({ success: false, error: '无权操作该样本', forbidden: true });
   }
   if (sample.status === 'scrapped') {
     return res.json({ success: false, error: '样本已报废，无法转移' });
@@ -756,12 +1009,15 @@ app.post('/api/samples/:id/transfer', (req, res) => {
   }
 });
 
-app.post('/api/samples/:id/outbound', (req, res) => {
+app.post('/api/samples/:id/outbound', requireWrite, (req, res) => {
   const { id } = req.params;
   const { operator, remark } = req.body;
   const sample = queryOne('SELECT * FROM samples WHERE id=?', [id]);
   if (!sample) {
     return res.json({ success: false, error: '样本不存在' });
+  }
+  if (!canAccessSample(id)) {
+    return res.json({ success: false, error: '无权操作该样本', forbidden: true });
   }
   if (sample.status === 'scrapped') {
     return res.json({ success: false, error: '样本已报废，无法出库' });
@@ -791,12 +1047,15 @@ app.post('/api/samples/:id/outbound', (req, res) => {
   }
 });
 
-app.post('/api/samples/:id/scrap', (req, res) => {
+app.post('/api/samples/:id/scrap', requireWrite, (req, res) => {
   const { id } = req.params;
   const { operator, remark } = req.body;
   const sample = queryOne('SELECT * FROM samples WHERE id=?', [id]);
   if (!sample) {
     return res.json({ success: false, error: '样本不存在' });
+  }
+  if (!canAccessSample(id)) {
+    return res.json({ success: false, error: '无权操作该样本', forbidden: true });
   }
   if (sample.status === 'scrapped') {
     return res.json({ success: false, error: '样本已报废' });
@@ -823,7 +1082,7 @@ app.post('/api/samples/:id/scrap', (req, res) => {
   }
 });
 
-app.post('/api/samples/:id/temp-exception', (req, res) => {
+app.post('/api/samples/:id/temp-exception', requireWrite, (req, res) => {
   const { id } = req.params;
   const { temperature, remark, operator } = req.body;
   if (temperature === undefined || temperature === null || temperature === '') {
@@ -832,6 +1091,9 @@ app.post('/api/samples/:id/temp-exception', (req, res) => {
   const sample = queryOne('SELECT * FROM samples WHERE id=?', [id]);
   if (!sample) {
     return res.json({ success: false, error: '样本不存在' });
+  }
+  if (!canAccessSample(id)) {
+    return res.json({ success: false, error: '无权操作该样本', forbidden: true });
   }
   const locId = sample.current_location_id;
   addTimeline(id, 'temp_exception', locId, locId, temperature, remark || '', operator || 'system');
@@ -875,7 +1137,7 @@ app.get('/api/samples/export/csv', (req, res) => {
   res.send(csv);
 });
 
-app.post('/api/samples/import/csv', (req, res) => {
+app.post('/api/samples/import/csv', requireWrite, (req, res) => {
   const { rows, operator } = req.body;
   if (!rows || !Array.isArray(rows) || rows.length === 0) {
     return res.json({ success: false, error: '导入数据为空' });
@@ -902,6 +1164,11 @@ app.post('/api/samples/import/csv', (req, res) => {
     if (zoneName) {
       const z = getZoneByName(zoneName);
       if (z) zoneId = z.id;
+    }
+    if (zoneId && !canAccessZone(zoneId)) {
+      results.failed++;
+      results.errors.push(`第${idx+1}行: 无权操作温区 ${zoneName}`);
+      return;
     }
     try {
       const info = run(`
@@ -993,6 +1260,16 @@ app.get('/api/inventory', requireAuth, (req, res) => {
     sql += ' AND io.status = ?';
     params.push(status);
   }
+  const accessibleZones = getAccessibleZoneIds();
+  if (accessibleZones !== null) {
+    if (accessibleZones.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+    sql += ' AND (io.zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')' +
+      ' OR io.location_id IN (SELECT sl.id FROM storage_locations sl WHERE sl.zone_id IN (' + accessibleZones.map(() => '?').join(',') + '))' +
+      ' OR (io.zone_id IS NULL AND io.location_id IS NULL))';
+    params.push(...accessibleZones, ...accessibleZones);
+  }
   sql += ' ORDER BY io.id DESC';
   const orders = queryAll(sql, params);
   orders.forEach(o => {
@@ -1058,7 +1335,7 @@ app.get('/api/inventory/:id', requireAuth, (req, res) => {
   res.json({ success: true, data: { order, items, discrepancies } });
 });
 
-app.post('/api/inventory', requireAuth, (req, res) => {
+app.post('/api/inventory', requireWrite, (req, res) => {
   const { title, type, zone_id, location_id, remark } = req.body;
   if (!title || !type) {
     return res.json({ success: false, error: '盘点标题和类型必填' });
@@ -1068,6 +1345,12 @@ app.post('/api/inventory', requireAuth, (req, res) => {
   }
   if (type === 'location' && !location_id) {
     return res.json({ success: false, error: '按库位盘点时请选择库位' });
+  }
+  if (type === 'zone' && zone_id && !canAccessZone(zone_id)) {
+    return res.json({ success: false, error: '无权操作该温区的盘点单', forbidden: true });
+  }
+  if (type === 'location' && location_id && !canAccessLocation(location_id)) {
+    return res.json({ success: false, error: '无权操作该库位所属温区的盘点单', forbidden: true });
   }
 
   const orderNo = generateOrderNo();
@@ -1084,7 +1367,7 @@ app.post('/api/inventory', requireAuth, (req, res) => {
   }
 });
 
-app.post('/api/inventory/:id/import', requireAuth, (req, res) => {
+app.post('/api/inventory/:id/import', requireWrite, (req, res) => {
   const { id } = req.params;
   const { csv_text, rows } = req.body;
 
@@ -1170,7 +1453,7 @@ app.post('/api/inventory/:id/import', requireAuth, (req, res) => {
   }
 });
 
-app.post('/api/inventory/:id/complete', requireAuth, (req, res) => {
+app.post('/api/inventory/:id/complete', requireWrite, (req, res) => {
   const { id } = req.params;
   const order = queryOne('SELECT * FROM inventory_orders WHERE id = ?', [id]);
   if (!order) {
@@ -1263,7 +1546,7 @@ app.get('/api/inventory/:id/export/csv', requireAuth, (req, res) => {
   res.send(csv);
 });
 
-app.post('/api/discrepancies/:id/note', requireAuth, (req, res) => {
+app.post('/api/discrepancies/:id/note', requireWrite, (req, res) => {
   const { id } = req.params;
   const { remark } = req.body;
 
@@ -1888,6 +2171,37 @@ app.get('/api/audit-log/export/csv', requireAdmin, (req, res) => {
   } catch (e) {
     res.json({ success: false, error: e.message });
   }
+});
+
+app.get('/api/user-zone-access', requireAdmin, (req, res) => {
+  const { user_id } = req.query;
+  let sql = 'SELECT uza.*, u.username, u.real_name, tz.name as zone_name FROM user_zone_access uza LEFT JOIN users u ON uza.user_id = u.id LEFT JOIN temperature_zones tz ON uza.zone_id = tz.id WHERE 1=1';
+  const params = [];
+  if (user_id) {
+    sql += ' AND uza.user_id = ?';
+    params.push(user_id);
+  }
+  sql += ' ORDER BY uza.user_id, uza.zone_id';
+  res.json({ success: true, data: queryAll(sql, params) });
+});
+
+app.post('/api/user-zone-access', requireAdmin, (req, res) => {
+  const { user_id, zone_id } = req.body;
+  if (!user_id || !zone_id) {
+    return res.json({ success: false, error: 'user_id 和 zone_id 必填' });
+  }
+  try {
+    run('INSERT OR IGNORE INTO user_zone_access (user_id, zone_id) VALUES (?, ?)', [user_id, zone_id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.delete('/api/user-zone-access/:id', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  run('DELETE FROM user_zone_access WHERE id = ?', [id]);
+  res.json({ success: true });
 });
 
 initDatabase().then(() => {

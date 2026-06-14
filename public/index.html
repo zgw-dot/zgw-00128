@@ -144,6 +144,9 @@ tr:hover { background: #f9fafb; }
 .timeline-item.inventory_correction::before { background: #0ea5e9; }
 
 .reversal-note { font-size: 12px; color: #7c3aed; margin-top: 4px; font-style: italic; }
+.batch-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;background:#eff6ff;border-radius:8px;margin-bottom:12px;border:1px solid #bfdbfe;}
+.batch-bar .count{font-weight:600;color:#1d4ed8;}
+select.batch-select{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;}
 </style>
 </head>
 <body>
@@ -216,8 +219,15 @@ tr:hover { background: #f9fafb; }
           <option value="scrapped">已报废</option>
         </select>
       </div>
+      <div class="batch-bar" id="batch-bar" style="display:none;">
+        <span>已选 <span class="count" id="batch-count">0</span> 个样本</span>
+        <button class="btn btn-success btn-sm" onclick="showBatchInboundModal()">批量入库</button>
+        <button class="btn btn-primary btn-sm" onclick="showBatchTransferModal()">批量转移</button>
+        <button class="btn btn-warning btn-sm" onclick="showBatchOutboundModal()">批量出库</button>
+        <button class="btn btn-secondary btn-sm" onclick="clearSelection()">取消选择</button>
+      </div>
       <table id="samples-table">
-        <thead><tr><th>条码</th><th>批次号</th><th>名称</th><th>要求温区</th><th>当前位置</th><th>状态</th><th>预警</th><th>操作</th></tr></thead>
+        <thead><tr><th><input type="checkbox" id="select-all-samples" onchange="toggleSelectAll(this)"></th><th>条码</th><th>批次号</th><th>名称</th><th>要求温区</th><th>当前位置</th><th>状态</th><th>预警</th><th>操作</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -367,7 +377,7 @@ function api(path, options = {}) {
       showLoginModal();
     }
     if (res.forbidden) {
-      alertMsg('权限不足，需要管理员角色', 'error');
+      alertMsg('权限不足：' + (res.error || '无操作权限'), 'error');
     }
     return res;
   });
@@ -486,6 +496,7 @@ function loadSamples() {
     tbody.innerHTML = res.data.map(s => {
       const badgeClass = 'badge-' + s.status.replace('_', '-');
       return `<tr>
+        <td><input type="checkbox" class="sample-checkbox" data-id="${s.id}" data-status="${s.status}" onchange="updateBatchBar()"></td>
         <td><strong>${s.barcode}</strong></td>
         <td>${s.batch_no}</td>
         <td>${s.name || '-'}</td>
@@ -501,6 +512,7 @@ function loadSamples() {
         </td>
       </tr>`;
     }).join('');
+    updateBatchBar();
   });
 }
 
@@ -1010,7 +1022,10 @@ function showLoginModal() {
     <div class="alert alert-warning" style="font-size:12px;">
       预置账号：<br>
       管理员: admin / admin123<br>
-      库管员: warehouse / wh123
+      库管员: warehouse / wh123<br>
+      冷藏库管员: wh_cold / whcold123<br>
+      冷冻库管员: wh_frozen / whfrozen123<br>
+      只读用户: viewer / view123
     </div>
     <div class="form-group"><label>用户名 *</label><input id="login-username" placeholder="用户名"></div>
     <div class="form-group"><label>密码 *</label><input id="login-password" type="password" placeholder="密码"></div>
@@ -1572,6 +1587,158 @@ api('/api/auth/current').then(res => {
 });
 
 loadDashboard();
+
+let selectedSampleIds = new Set();
+
+function toggleSelectAll(checkbox) {
+  const checkboxes = document.querySelectorAll('.sample-checkbox');
+  checkboxes.forEach(cb => {
+    cb.checked = checkbox.checked;
+    const id = parseInt(cb.dataset.id);
+    if (checkbox.checked) selectedSampleIds.add(id);
+    else selectedSampleIds.delete(id);
+  });
+  updateBatchBar();
+}
+
+function updateBatchBar() {
+  selectedSampleIds.clear();
+  document.querySelectorAll('.sample-checkbox:checked').forEach(cb => {
+    selectedSampleIds.add(parseInt(cb.dataset.id));
+  });
+  const bar = document.getElementById('batch-bar');
+  const countEl = document.getElementById('batch-count');
+  if (selectedSampleIds.size > 0) {
+    bar.style.display = 'flex';
+    countEl.textContent = selectedSampleIds.size;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+function clearSelection() {
+  selectedSampleIds.clear();
+  document.querySelectorAll('.sample-checkbox').forEach(cb => cb.checked = false);
+  document.getElementById('select-all-samples').checked = false;
+  updateBatchBar();
+}
+
+function getSelectedSamples() {
+  const samples = [];
+  document.querySelectorAll('.sample-checkbox:checked').forEach(cb => {
+    samples.push({ id: parseInt(cb.dataset.id), status: cb.dataset.status });
+  });
+  return samples;
+}
+
+function showBatchInboundModal() {
+  const selected = getSelectedSamples();
+  const valid = selected.filter(s => s.status === 'pending');
+  if (valid.length === 0) { alertMsg('请选择待入库状态的样本', 'warning'); return; }
+  api('/api/locations').then(res => {
+    if (!res.success) return;
+    const locs = res.data.filter(l => l.occupancy < l.capacity);
+    showModal(`
+      <h3>批量入库（${valid.length}个样本）</h3>
+      <div class="alert alert-warning" style="font-size:12px;">所有样本将入库到同一库位。任意一条校验失败则整批回滚。</div>
+      <div class="form-group"><label>入库库位 *</label>
+        <select id="batch-in-location">
+          ${locs.map(l => `<option value="${l.id}">${l.code} - ${l.name} (${l.zone_name}, ${l.occupancy}/${l.capacity})</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>备注</label><textarea id="batch-in-remark"></textarea></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-success" onclick="doBatchInbound()">确认批量入库</button>
+      </div>
+    `);
+  });
+}
+
+function doBatchInbound() {
+  const location_id = parseInt(document.getElementById('batch-in-location').value);
+  const remark = document.getElementById('batch-in-remark').value.trim();
+  if (!location_id) { alertMsg('请选择库位', 'error'); return; }
+  const selected = getSelectedSamples().filter(s => s.status === 'pending');
+  const items = selected.map(s => ({ sample_id: s.id, location_id }));
+  api('/api/samples/batch/inbound', { method: 'POST', body: { items, remark } }).then(res => {
+    if (res.success) {
+      alertMsg(`批量入库成功：${res.data.success}条`);
+      closeModal(); clearSelection(); loadSamples(); loadDashboard();
+    } else {
+      alertMsg(`批量入库失败（已回滚）：${res.error}`, 'error');
+    }
+  });
+}
+
+function showBatchTransferModal() {
+  const selected = getSelectedSamples();
+  const valid = selected.filter(s => s.status === 'in_storage');
+  if (valid.length === 0) { alertMsg('请选择在库状态的样本', 'warning'); return; }
+  api('/api/locations').then(res => {
+    if (!res.success) return;
+    const locs = res.data.filter(l => l.occupancy < l.capacity);
+    showModal(`
+      <h3>批量转移（${valid.length}个样本）</h3>
+      <div class="alert alert-warning" style="font-size:12px;">所有样本将转移到同一目标库位。任意一条校验失败则整批回滚。</div>
+      <div class="form-group"><label>目标库位 *</label>
+        <select id="batch-tf-location">
+          ${locs.map(l => `<option value="${l.id}">${l.code} - ${l.name} (${l.zone_name}, ${l.occupancy}/${l.capacity})</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>备注</label><textarea id="batch-tf-remark"></textarea></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="doBatchTransfer()">确认批量转移</button>
+      </div>
+    `);
+  });
+}
+
+function doBatchTransfer() {
+  const to_location_id = parseInt(document.getElementById('batch-tf-location').value);
+  const remark = document.getElementById('batch-tf-remark').value.trim();
+  if (!to_location_id) { alertMsg('请选择目标库位', 'error'); return; }
+  const selected = getSelectedSamples().filter(s => s.status === 'in_storage');
+  const items = selected.map(s => ({ sample_id: s.id, to_location_id }));
+  api('/api/samples/batch/transfer', { method: 'POST', body: { items, remark } }).then(res => {
+    if (res.success) {
+      alertMsg(`批量转移成功：${res.data.success}条`);
+      closeModal(); clearSelection(); loadSamples(); loadDashboard();
+    } else {
+      alertMsg(`批量转移失败（已回滚）：${res.error}`, 'error');
+    }
+  });
+}
+
+function showBatchOutboundModal() {
+  const selected = getSelectedSamples();
+  const valid = selected.filter(s => s.status === 'in_storage');
+  if (valid.length === 0) { alertMsg('请选择在库状态的样本', 'warning'); return; }
+  showModal(`
+    <h3>批量出库（${valid.length}个样本）</h3>
+    <div class="alert alert-warning" style="font-size:12px;">任意一条校验失败则整批回滚。</div>
+    <div class="form-group"><label>备注</label><textarea id="batch-out-remark"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-warning" onclick="doBatchOutbound()">确认批量出库</button>
+    </div>
+  `);
+}
+
+function doBatchOutbound() {
+  const remark = document.getElementById('batch-out-remark').value.trim();
+  const selected = getSelectedSamples().filter(s => s.status === 'in_storage');
+  const items = selected.map(s => ({ sample_id: s.id }));
+  api('/api/samples/batch/outbound', { method: 'POST', body: { items, remark } }).then(res => {
+    if (res.success) {
+      alertMsg(`批量出库成功：${res.data.success}条`);
+      closeModal(); clearSelection(); loadSamples(); loadDashboard();
+    } else {
+      alertMsg(`批量出库失败（已回滚）：${res.error}`, 'error');
+    }
+  });
+}
 </script>
 </body>
 </html>
