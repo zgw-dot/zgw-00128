@@ -2282,7 +2282,7 @@ app.get('/api/history/search', requireAuth, (req, res) => {
 });
 
 function buildAuditLogQuery(req, forExport = false) {
-  const { operator, action_type, start_date, end_date, object_type, keyword, page, page_size } = req.query;
+  const { operator, action_type, start_date, end_date, object_type, keyword, page, page_size, from, to, operator_id } = req.query;
 
   let sql = `
     SELECT al.*,
@@ -2297,6 +2297,10 @@ function buildAuditLogQuery(req, forExport = false) {
     sql += ' AND (al.operator_name LIKE ? OR u.username LIKE ?)';
     params.push(`%${operator}%`, `%${operator}%`);
   }
+  if (operator_id) {
+    sql += ' AND al.operator_id = ?';
+    params.push(parseInt(operator_id));
+  }
   if (action_type && action_type !== 'all') {
     sql += ' AND al.action_type = ?';
     params.push(action_type);
@@ -2304,6 +2308,14 @@ function buildAuditLogQuery(req, forExport = false) {
   if (object_type && object_type !== 'all') {
     sql += ' AND al.object_type = ?';
     params.push(object_type);
+  }
+  if (from) {
+    sql += ' AND al.created_at >= ?';
+    params.push(from);
+  }
+  if (to) {
+    sql += ' AND al.created_at <= ?';
+    params.push(to);
   }
   if (start_date) {
     sql += ' AND date(al.created_at) >= date(?)';
@@ -2441,6 +2453,47 @@ app.post('/api/user-zone-access', requireAdmin, (req, res) => {
   try {
     run('INSERT OR IGNORE INTO user_zone_access (user_id, zone_id) VALUES (?, ?)', [user_id, zone_id]);
     res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/batches/summary', requireAuth, (req, res) => {
+  try {
+    const { batch_no } = req.query;
+    let sql = `
+      SELECT
+        s.batch_no,
+        COUNT(*) AS total,
+        SUM(CASE WHEN s.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN s.status = 'in_storage' THEN 1 ELSE 0 END) AS in_storage_count,
+        SUM(CASE WHEN s.status = 'outbound' THEN 1 ELSE 0 END) AS outbound_count,
+        SUM(CASE WHEN s.status = 'scrapped' THEN 1 ELSE 0 END) AS scrapped_count,
+        MIN(s.created_at) AS first_registered_at,
+        MAX(s.updated_at) AS last_operated_at
+      FROM samples s
+    `;
+    const params = [];
+    const conditions = [];
+    if (batch_no) {
+      conditions.push('s.batch_no = ?');
+      params.push(batch_no);
+    }
+    const accessibleZones = getAccessibleZoneIds();
+    if (accessibleZones !== null) {
+      if (accessibleZones.length === 0) {
+        return res.json({ success: true, data: [] });
+      }
+      conditions.push('(s.required_zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')' +
+        ' OR EXISTS (SELECT 1 FROM storage_locations sl2 WHERE sl2.id = s.current_location_id AND sl2.zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')))');
+      params.push(...accessibleZones, ...accessibleZones);
+    }
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' GROUP BY s.batch_no ORDER BY s.batch_no';
+    const rows = queryAll(sql, params);
+    res.json({ success: true, data: rows });
   } catch (e) {
     res.json({ success: false, error: e.message });
   }
