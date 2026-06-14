@@ -69,7 +69,9 @@ const AUDIT_ACTION_LABELS = {
   inventory_import: '盘点导入',
   batch_import: '批量导入',
   correction: '纠错',
-  reverse: '撤销'
+  reverse: '撤销',
+  threshold_setting: '阈值设置',
+  batch_transition: '批量状态变更'
 };
 
 const AUDIT_OBJECT_LABELS = {
@@ -78,10 +80,14 @@ const AUDIT_OBJECT_LABELS = {
   discrepancy: '差异记录',
   timeline: '操作记录',
   user: '用户',
-  sample_import_batch: '导入批次'
+  sample_import_batch: '导入批次',
+  inventory_config: '库存配置',
+  item_threshold: '物品阈值'
 };
 
 let currentUser = null;
+
+const batchTransitionLocks = new Map();
 
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
@@ -1488,6 +1494,177 @@ app.get('/api/dashboard/stats', (req, res) => {
   });
 });
 
+// 获取默认低库存阈值
+app.get('/api/inventory/config/threshold', requireAuth, (req, res) => {
+  try {
+    const config = queryOne("SELECT config_value FROM inventory_config WHERE config_key = 'default_low_stock_threshold'");
+    const threshold = config ? parseInt(config.config_value) : 10;
+    res.json({ success: true, data: { default_threshold: threshold } });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// 设置默认低库存阈值
+app.put('/api/inventory/config/threshold', requireAdmin, (req, res) => {
+  const { threshold } = req.body;
+  if (threshold === undefined || threshold === null || isNaN(threshold)) {
+    return res.json({ success: false, error: '阈值不能为空且必须是数字' });
+  }
+  const thresholdNum = parseInt(threshold);
+  if (thresholdNum < 0) {
+    return res.json({ success: false, error: '阈值不能为负数' });
+  }
+  try {
+    const beforeConfig = queryOne("SELECT config_value FROM inventory_config WHERE config_key = 'default_low_stock_threshold'");
+    const beforeValue = beforeConfig ? parseInt(beforeConfig.config_value) : null;
+
+    run(`
+      INSERT INTO inventory_config (config_key, config_value, updated_at)
+      VALUES ('default_low_stock_threshold', ?, datetime('now','localtime'))
+      ON CONFLICT(config_key) DO UPDATE SET
+        config_value = excluded.config_value,
+        updated_at = datetime('now','localtime')
+    `, [String(thresholdNum)]);
+
+    addAuditLog(req, 'threshold_setting', 'inventory_config', 'default_low_stock_threshold',
+      { default_threshold: beforeValue },
+      { default_threshold: thresholdNum },
+      `设置默认低库存阈值: ${beforeValue} → ${thresholdNum}`);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// 获取物品阈值
+app.get('/api/inventory/item-threshold', requireAuth, (req, res) => {
+  try {
+    const { item_name } = req.query;
+    let sql = 'SELECT * FROM item_threshold';
+    const params = [];
+    if (item_name) {
+      sql += ' WHERE item_name = ?';
+      params.push(item_name);
+    }
+    sql += ' ORDER BY item_name';
+    const rows = queryAll(sql, params);
+    res.json({ success: true, data: rows });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// 设置物品阈值
+app.put('/api/inventory/item-threshold', requireAdmin, (req, res) => {
+  const { item_name, threshold } = req.body;
+  if (!item_name) {
+    return res.json({ success: false, error: '物品名称必填' });
+  }
+  if (threshold === undefined || threshold === null || isNaN(threshold)) {
+    return res.json({ success: false, error: '阈值不能为空且必须是数字' });
+  }
+  const thresholdNum = parseInt(threshold);
+  if (thresholdNum < 0) {
+    return res.json({ success: false, error: '阈值不能为负数' });
+  }
+  try {
+    const beforeItem = queryOne('SELECT threshold FROM item_threshold WHERE item_name = ?', [item_name]);
+    const beforeValue = beforeItem ? beforeItem.threshold : null;
+
+    run(`
+      INSERT INTO item_threshold (item_name, threshold, updated_at)
+      VALUES (?, ?, datetime('now','localtime'))
+      ON CONFLICT(item_name) DO UPDATE SET
+        threshold = excluded.threshold,
+        updated_at = datetime('now','localtime')
+    `, [item_name, thresholdNum]);
+
+    addAuditLog(req, 'threshold_setting', 'item_threshold', item_name,
+      { item_name, threshold: beforeValue },
+      { item_name, threshold: thresholdNum },
+      beforeValue !== null
+        ? `设置物品"${item_name}"阈值: ${beforeValue} → ${thresholdNum}`
+        : `新增物品"${item_name}"阈值: ${thresholdNum}`);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// 删除物品阈值
+app.delete('/api/inventory/item-threshold/:item_name', requireAdmin, (req, res) => {
+  const { item_name } = req.params;
+  try {
+    const beforeItem = queryOne('SELECT threshold FROM item_threshold WHERE item_name = ?', [item_name]);
+    if (!beforeItem) {
+      return res.json({ success: false, error: '物品阈值不存在' });
+    }
+    run('DELETE FROM item_threshold WHERE item_name = ?', [item_name]);
+
+    addAuditLog(req, 'threshold_setting', 'item_threshold', item_name,
+      { item_name, threshold: beforeItem.threshold },
+      null,
+      `删除物品"${item_name}"阈值`);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// 低库存预警查询
+app.get('/api/inventory/low-stock', requireAuth, (req, res) => {
+  try {
+    const defaultConfig = queryOne("SELECT config_value FROM inventory_config WHERE config_key = 'default_low_stock_threshold'");
+    const defaultThreshold = defaultConfig ? parseInt(defaultConfig.config_value) : 10;
+
+    const accessibleZones = getAccessibleZoneIds();
+    let zoneCondition = '';
+    const params = [];
+
+    if (accessibleZones !== null) {
+      if (accessibleZones.length === 0) {
+        return res.json({ success: true, data: [] });
+      }
+      zoneCondition = ' AND (s.required_zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')' +
+        ' OR EXISTS (SELECT 1 FROM storage_locations sl2 WHERE sl2.id = s.current_location_id AND sl2.zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')))';
+      params.push(...accessibleZones, ...accessibleZones);
+    }
+
+    const sql = `
+      SELECT
+        s.name,
+        s.batch_no,
+        COUNT(*) as stock_count,
+        COALESCE(it.threshold, ?) as threshold,
+        MAX(s.updated_at) as last_updated_at
+      FROM samples s
+      LEFT JOIN item_threshold it ON s.name = it.item_name
+      WHERE s.status = 'in_storage'
+      ${zoneCondition}
+      GROUP BY s.name, s.batch_no
+      HAVING COUNT(*) < COALESCE(it.threshold, ?)
+      ORDER BY s.name, s.batch_no
+    `;
+
+    const allParams = [defaultThreshold, ...params, defaultThreshold];
+    const rows = queryAll(sql, allParams);
+
+    res.json({
+      success: true,
+      data: {
+        default_threshold: defaultThreshold,
+        items: rows
+      }
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
 app.get('/api/inventory', requireAuth, (req, res) => {
   const { keyword, status } = req.query;
   let sql = `
@@ -2495,6 +2672,183 @@ app.get('/api/batches/summary', requireAuth, (req, res) => {
     const rows = queryAll(sql, params);
     res.json({ success: true, data: rows });
   } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// 批量状态变更
+app.post('/api/batches/:batchNo/transition', requireWrite, (req, res) => {
+  const { batchNo } = req.params;
+  const { from_status, to_status, remark, location_id } = req.body;
+
+  if (!from_status || !to_status) {
+    return res.json({ success: false, error: 'from_status 和 to_status 必填' });
+  }
+
+  const validStatuses = ['pending', 'in_storage', 'outbound', 'scrapped'];
+  if (!validStatuses.includes(from_status)) {
+    return res.json({ success: false, error: `无效的源状态: ${from_status}` });
+  }
+  if (!validStatuses.includes(to_status)) {
+    return res.json({ success: false, error: `无效的目标状态: ${to_status}` });
+  }
+  if (from_status === to_status) {
+    return res.json({ success: false, error: '源状态和目标状态不能相同' });
+  }
+
+  // 并发控制：检查是否有正在进行的同批次变更
+  if (batchTransitionLocks.has(batchNo)) {
+    return res.status(409).json({
+      success: false,
+      error: '该批次正在进行批量状态变更，请稍后再试',
+      conflict: true
+    });
+  }
+
+  // 加锁
+  batchTransitionLocks.set(batchNo, true);
+
+  try {
+    const operator = currentUser.real_name || currentUser.username;
+    let changedCount = 0;
+    let failedCount = 0;
+    const errors = [];
+
+    // 先查询该批次源状态的样本列表
+    const samples = queryAll(`
+      SELECT s.*, sl.code as location_code
+      FROM samples s
+      LEFT JOIN storage_locations sl ON s.current_location_id = sl.id
+      WHERE s.batch_no = ? AND s.status = ?
+    `, [batchNo, from_status]);
+
+    if (samples.length === 0) {
+      batchTransitionLocks.delete(batchNo);
+      return res.json({
+        success: true,
+        data: {
+          changed: 0,
+          failed: 0,
+          errors: [],
+          remark: '该批次没有符合源状态的记录'
+        }
+      });
+    }
+
+    // 权限检查
+    const accessibleZones = getAccessibleZoneIds();
+    if (accessibleZones !== null) {
+      for (const sample of samples) {
+        if (!canAccessSample(sample.id)) {
+          failedCount++;
+          errors.push(`样本 ${sample.barcode}: 无操作权限`);
+        }
+      }
+      if (failedCount > 0 && failedCount === samples.length) {
+        batchTransitionLocks.delete(batchNo);
+        return res.json({
+          success: false,
+          error: '所有样本均无操作权限',
+          data: { changed: 0, failed: failedCount, errors }
+        });
+      }
+    }
+
+    // 如果目标状态是 in_storage 且指定了 location_id，验证库位
+    if (to_status === 'in_storage' && location_id) {
+      const loc = getLocationWithZone(location_id);
+      if (!loc) {
+        batchTransitionLocks.delete(batchNo);
+        return res.json({ success: false, error: '目标库位不存在' });
+      }
+      if (!canAccessLocation(location_id)) {
+        batchTransitionLocks.delete(batchNo);
+        return res.json({ success: false, error: '无权操作目标库位所属温区', forbidden: true });
+      }
+      const occupancy = getLocationOccupancy(location_id);
+      const targetSamples = samples.filter(s => canAccessSample(s.id));
+      if (occupancy + targetSamples.length -
+          samples.filter(s => s.status === 'in_storage' && s.current_location_id === location_id).length
+          > loc.capacity) {
+        batchTransitionLocks.delete(batchNo);
+        return res.json({ success: false, error: `目标库位容量不足（容量${loc.capacity}）` });
+      }
+    }
+
+    runTransaction(() => {
+      for (const sample of samples) {
+        if (accessibleZones !== null && !canAccessSample(sample.id)) {
+          continue;
+        }
+
+        const beforeSample = { ...sample };
+
+        // 构建更新 SQL
+        let updateSql = `
+          UPDATE samples SET
+            status = ?,
+            updated_at = datetime('now','localtime')
+        `;
+        const updateParams = [to_status];
+
+        // 根据目标状态处理库位
+        if (to_status === 'outbound' || to_status === 'scrapped') {
+          updateSql += ', current_location_id = NULL';
+        } else if (to_status === 'in_storage' && location_id) {
+          updateSql += ', current_location_id = ?';
+          updateParams.push(location_id);
+        }
+
+        updateSql += ' WHERE id = ?';
+        updateParams.push(sample.id);
+
+        runInTx(updateSql, updateParams);
+
+        // 记录时间线
+        let actionType = 'transfer';
+        if (to_status === 'in_storage') actionType = 'inbound';
+        else if (to_status === 'outbound') actionType = 'outbound';
+        else if (to_status === 'scrapped') actionType = 'scrapped';
+        else if (to_status === 'pending') actionType = 'register';
+
+        const fromLocId = sample.current_location_id;
+        const toLocId = (to_status === 'in_storage' && location_id) ? location_id :
+                        (to_status === 'in_storage' ? sample.current_location_id : null);
+
+        addTimelineInTx(sample.id, actionType, fromLocId, toLocId, null,
+          remark || `批量状态变更: ${from_status} → ${to_status}`, operator);
+
+        // 记录审计日志
+        addAuditLogInTx(req, 'batch_transition', 'sample', sample.id,
+          { status: beforeSample.status, location_id: beforeSample.current_location_id, location_code: beforeSample.location_code },
+          { status: to_status, location_id: toLocId },
+          `批次 ${batchNo} 批量状态变更: ${from_status} → ${to_status}${remark ? '，备注: ' + remark : ''}`);
+
+        changedCount++;
+      }
+    });
+
+    // 记录批次级别的审计日志
+    addAuditLog(req, 'batch_transition', 'sample_import_batch', batchNo,
+      { batch_no: batchNo, from_status, total_samples: samples.length },
+      { batch_no: batchNo, to_status, changed: changedCount, failed: failedCount },
+      `批次 ${batchNo} 批量状态变更完成: ${from_status} → ${to_status}，成功 ${changedCount} 条，失败 ${failedCount} 条`);
+
+    batchTransitionLocks.delete(batchNo);
+
+    res.json({
+      success: true,
+      data: {
+        changed: changedCount,
+        failed: failedCount,
+        errors,
+        from_status,
+        to_status
+      }
+    });
+
+  } catch (e) {
+    batchTransitionLocks.delete(batchNo);
     res.json({ success: false, error: e.message });
   }
 });

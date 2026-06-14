@@ -239,6 +239,26 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventory_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      config_key TEXT NOT NULL UNIQUE,
+      config_value TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS item_threshold (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_name TEXT NOT NULL UNIQUE,
+      threshold INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_barcode ON samples(barcode)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_status ON samples(status)`);
@@ -263,6 +283,8 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_user_zone_access_zone ON user_zone_access(zone_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_import_batches_status ON sample_import_batches(status)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_import_results_batch ON sample_import_results(batch_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_inventory_config_key ON inventory_config(config_key)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_item_threshold_name ON item_threshold(item_name)`);
   } catch(e) {}
 
   const zoneCount = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones')[0].values[0][0];
@@ -324,6 +346,12 @@ async function initDatabase() {
   ensureUserZone('warehouse', '冷冻(-20℃)');
   ensureUserZone('warehouse', '深冻(-80℃)');
   ensureUserZone('warehouse', '常温(15-25℃)');
+
+  // 初始化库存配置：默认低库存阈值
+  const defaultThreshold = db.exec("SELECT COUNT(*) as cnt FROM inventory_config WHERE config_key='default_low_stock_threshold'")[0].values[0][0];
+  if (defaultThreshold === 0) {
+    db.run(`INSERT INTO inventory_config (config_key, config_value) VALUES ('default_low_stock_threshold', '10')`);
+  }
 
   saveDatabase();
 }
