@@ -1142,7 +1142,7 @@ app.get('/api/samples/export/csv', (req, res) => {
 app.post('/api/samples/import/csv', requireAdmin, (req, res) => {
   const { rows, operator } = req.body;
   if (!rows || !Array.isArray(rows) || rows.length === 0) {
-    return res.json({ success: false, error: '导入数据为空' });
+    return res.json({ success: false, error: '导入数据为空', data: { errors: [], results: [] } });
   }
 
   const ip = getClientIp(req);
@@ -1186,6 +1186,85 @@ app.post('/api/samples/import/csv', requireAdmin, (req, res) => {
     }
   }
 
+  if (validationErrors.length > 0) {
+    const batchInfo = run(`
+      INSERT INTO sample_import_batches
+      (total_rows, success_count, failed_count, status, operator_id, operator_name, ip_address, remark)
+      VALUES (?, 0, ?, 'failed', ?, ?, ?, ?)
+    `, [rows.length, validationErrors.length, opId, opName, ip, `批量导入失败: ${validationErrors.length}条校验不通过，整批回滚`]);
+    const batchId = batchInfo.lastInsertRowid;
+
+    validationErrors.forEach(err => {
+      run(`
+        INSERT INTO sample_import_results
+        (batch_id, row_number, barcode, batch_no, name, required_zone, status, failure_reason)
+        VALUES (?, ?, ?, ?, ?, ?, 'failed', ?)
+      `, [batchId, err.row_number, err.barcode, err.batch_no, err.name, err.required_zone, err.error]);
+
+      insertAuditLog({
+        operator_id: opId,
+        operator_name: opName,
+        ip_address: ip,
+        action_type: 'batch_import',
+        object_type: 'sample',
+        object_id: err.barcode || `row_${err.row_number}`,
+        before_value: null,
+        after_value: {
+          row_number: err.row_number,
+          barcode: err.barcode,
+          batch_no: err.batch_no,
+          name: err.name,
+          required_zone: err.required_zone,
+          status: 'failed',
+          failure_reason: err.error
+        },
+        remark: `批量导入失败: ${err.error}`
+      });
+    });
+
+    insertAuditLog({
+      operator_id: opId,
+      operator_name: opName,
+      ip_address: ip,
+      action_type: 'batch_import',
+      object_type: 'sample_import_batch',
+      object_id: String(batchId),
+      before_value: null,
+      after_value: {
+        total_rows: rows.length,
+        success_count: 0,
+        failed_count: validationErrors.length,
+        status: 'failed',
+        first_error: validationErrors[0].error
+      },
+      remark: `批量导入整批失败: 共${rows.length}条，${validationErrors.length}条校验不通过，整批回滚`
+    });
+
+    const importResults = validationErrors.map(err => ({
+      row_number: err.row_number,
+      barcode: err.barcode,
+      batch_no: err.batch_no,
+      name: err.name,
+      required_zone: err.required_zone,
+      status: 'failed',
+      failure_reason: err.error
+    }));
+
+    return res.json({
+      success: false,
+      error: `导入失败: ${validationErrors[0].error}，整批已回滚`,
+      data: {
+        batch_id: batchId,
+        total: rows.length,
+        success: 0,
+        failed: validationErrors.length,
+        results: importResults,
+        errors: importResults,
+        rollback: true
+      }
+    });
+  }
+
   let batchId = null;
   const results = [];
 
@@ -1197,64 +1276,6 @@ app.post('/api/samples/import/csv', requireAdmin, (req, res) => {
         VALUES (?, 0, 0, 'processing', ?, ?, ?, ?)
       `, [rows.length, opId, opName, ip, `批量导入${rows.length}条样本`]);
       batchId = batchInfo.lastInsertRowid;
-
-      if (validationErrors.length > 0) {
-        validationErrors.forEach(err => {
-          runInTx(`
-            INSERT INTO sample_import_results
-            (batch_id, row_number, barcode, batch_no, name, required_zone, status, failure_reason)
-            VALUES (?, ?, ?, ?, ?, ?, 'failed', ?)
-          `, [batchId, err.row_number, err.barcode, err.batch_no, err.name, err.required_zone, err.error]);
-
-          insertAuditLogInTx({
-            operator_id: opId,
-            operator_name: opName,
-            ip_address: ip,
-            action_type: 'batch_import',
-            object_type: 'sample',
-            object_id: err.barcode || `row_${err.row_number}`,
-            before_value: null,
-            after_value: {
-              row_number: err.row_number,
-              barcode: err.barcode,
-              batch_no: err.batch_no,
-              name: err.name,
-              required_zone: err.required_zone,
-              status: 'failed',
-              failure_reason: err.error
-            },
-            remark: `批量导入失败: ${err.error}`
-          });
-        });
-
-        const failedCount = validationErrors.length;
-        runInTx(`
-          UPDATE sample_import_batches
-          SET failed_count = ?, success_count = 0, status = 'failed',
-              updated_at = datetime('now','localtime')
-          WHERE id = ?
-        `, [failedCount, batchId]);
-
-        insertAuditLogInTx({
-          operator_id: opId,
-          operator_name: opName,
-          ip_address: ip,
-          action_type: 'batch_import',
-          object_type: 'sample_import_batch',
-          object_id: String(batchId),
-          before_value: null,
-          after_value: {
-            total_rows: rows.length,
-            success_count: 0,
-            failed_count: failedCount,
-            status: 'failed',
-            first_error: validationErrors[0].error
-          },
-          remark: `批量导入整批失败: 共${rows.length}条，${failedCount}条校验不通过，整批回滚`
-        });
-
-        throw new Error(validationErrors[0].error);
-      }
 
       let successCount = 0;
       for (let i = 0; i < rows.length; i++) {
@@ -1328,28 +1349,31 @@ app.post('/api/samples/import/csv', requireAdmin, (req, res) => {
       });
     });
 
-    res.json({ success: true, data: { batch_id: batchId, total: rows.length, success: results.length, failed: 0, results } });
+    res.json({
+      success: true,
+      data: {
+        batch_id: batchId,
+        total: rows.length,
+        success: results.length,
+        failed: 0,
+        results,
+        errors: []
+      }
+    });
   } catch (e) {
-    if (batchId) {
-      const importResults = queryAll(
-        'SELECT row_number, barcode, batch_no, name, required_zone, status, failure_reason FROM sample_import_results WHERE batch_id = ? ORDER BY row_number',
-        [batchId]
-      );
-      res.json({
-        success: false,
-        error: `导入失败: ${e.message}，整批已回滚`,
-        data: {
-          batch_id: batchId,
-          total: rows.length,
-          success: 0,
-          failed: validationErrors.length,
-          results: importResults,
-          rollback: true
-        }
-      });
-    } else {
-      res.json({ success: false, error: e.message, rollback: true });
-    }
+    res.json({
+      success: false,
+      error: `导入失败: ${e.message}，整批已回滚`,
+      data: {
+        batch_id: batchId,
+        total: rows.length,
+        success: 0,
+        failed: rows.length,
+        results: [],
+        errors: [],
+        rollback: true
+      }
+    });
   }
 });
 
