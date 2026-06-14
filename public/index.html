@@ -142,6 +142,7 @@ tr:hover { background: #f9fafb; }
 .timeline-item.reverse_transfer::before { background: #8b5cf6; }
 .timeline-item.reverse_scrapped::before { background: #8b5cf6; }
 .timeline-item.inventory_correction::before { background: #0ea5e9; }
+.timeline-item.label_reprint::before { background: #ec4899; }
 
 .reversal-note { font-size: 12px; color: #7c3aed; margin-top: 4px; font-style: italic; }
 .batch-bar{display:flex;align-items:center;gap:10px;padding:12px 16px;background:#eff6ff;border-radius:8px;margin-bottom:12px;border:1px solid #bfdbfe;}
@@ -159,6 +160,7 @@ select.batch-select{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;
       <button class="nav-btn" onclick="switchPage('samples')">样本管理</button>
       <button class="nav-btn" onclick="switchPage('inventory')">盘点管理</button>
       <button class="nav-btn" onclick="switchPage('history')">历史查询</button>
+      <button class="nav-btn" onclick="switchPage('label-reprints')">标签补打</button>
       <button class="nav-btn" onclick="switchPage('config')">库位配置</button>
     </div>
     <div class="user-info" id="user-info">
@@ -247,6 +249,7 @@ select.batch-select{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;
           <button class="btn btn-info btn-sm" onclick="showTempExceptionModal()" id="btn-temp-exp" style="background:#6366f1;color:white;">温控异常</button>
           <button class="btn btn-warning btn-sm" onclick="showOutboundModal()" id="btn-outbound">出库</button>
           <button class="btn btn-danger btn-sm" onclick="showScrapModal()" id="btn-scrap">报废</button>
+          <button class="btn btn-sm" style="background:#8b5cf6;color:white;" onclick="showReprintLabelModal()" id="btn-reprint">补打标签</button>
         </div>
       </div>
       <div class="detail-info" id="detail-info"></div>
@@ -352,6 +355,25 @@ select.batch-select{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;
     </div>
   </div>
 
+  <div id="page-label-reprints" class="page">
+    <div class="card">
+      <div class="card-title">
+        <span>🏷️ 标签补打记录</span>
+        <button class="btn btn-secondary btn-sm" onclick="exportLabelReprintsCSV()">📤 导出CSV</button>
+      </div>
+      <div class="search-bar">
+        <input type="text" id="lr-barcode" placeholder="按条码筛选..." oninput="loadLabelReprints()">
+        <input type="text" id="lr-batch" placeholder="按批次筛选..." oninput="loadLabelReprints()">
+        <button class="btn btn-secondary btn-sm" onclick="loadLabelReprints()">🔍 查询</button>
+      </div>
+      <table id="label-reprints-table">
+        <thead><tr><th>ID</th><th>条码</th><th>批次号</th><th>样本名称</th><th>温区</th><th>库位</th><th>补打原因</th><th>份数</th><th>操作人</th><th>补打时间</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="lr-pagination" style="margin-top:16px;text-align:center;"></div>
+    </div>
+  </div>
+
 </div>
 
 <div class="modal-backdrop" id="modal-backdrop">
@@ -388,13 +410,14 @@ function switchPage(name) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   const pageId = name === 'detail' ? 'page-detail' : 'page-' + name;
   document.getElementById(pageId).classList.add('active');
-  const btnMap = { dashboard: 0, samples: 1, inventory: 2, history: 3, config: 4 };
+  const btnMap = { dashboard: 0, samples: 1, inventory: 2, history: 3, 'label-reprints': 4, config: 5 };
   if (btnMap[name] !== undefined) {
     document.querySelectorAll('.nav-btn')[btnMap[name]].classList.add('active');
   }
   if (name === 'dashboard') loadDashboard();
   if (name === 'samples') loadSamples();
   if (name === 'inventory') loadInventory();
+  if (name === 'label-reprints') loadLabelReprints();
   if (name === 'config') { loadZones(); loadLocations(); }
 }
 
@@ -509,6 +532,7 @@ function loadSamples() {
           ${s.status === 'pending' ? `<button class="btn btn-sm btn-success" onclick="quickInbound(${s.id})">入库</button>` : ''}
           ${s.status === 'in_storage' ? `<button class="btn btn-sm btn-primary" onclick="quickTransfer(${s.id})">转移</button> <button class="btn btn-sm btn-warning" onclick="quickOutbound(${s.id})">出库</button>` : ''}
           ${s.status !== 'scrapped' && s.status !== 'outbound' ? `<button class="btn btn-sm btn-danger" onclick="quickScrap(${s.id})">报废</button>` : ''}
+          ${(s.status === 'in_storage' || s.status === 'pending') ? `<button class="btn btn-sm" style="background:#8b5cf6;color:white;" onclick="quickReprintLabel(${s.id})">补打</button>` : ''}
         </td>
       </tr>`;
     }).join('');
@@ -557,6 +581,7 @@ function renderDetail() {
   document.getElementById('btn-temp-exp').style.display = s.status === 'in_storage' ? '' : 'none';
   document.getElementById('btn-outbound').style.display = s.status === 'in_storage' ? '' : 'none';
   document.getElementById('btn-scrap').style.display = (s.status !== 'scrapped' && s.status !== 'outbound') ? '' : 'none';
+  document.getElementById('btn-reprint').style.display = (s.status === 'in_storage' || s.status === 'pending') ? '' : 'none';
 
   const tl = document.getElementById('timeline');
   if (s.timeline.length === 0) {
@@ -627,6 +652,230 @@ function quickOutbound(id) {
 function quickScrap(id) {
   currentSampleId = id;
   showScrapModal();
+}
+
+function quickReprintLabel(id) {
+  currentSampleId = id;
+  showReprintLabelModal();
+}
+
+function showReprintLabelModal() {
+  showModal(`
+    <h3>补打标签</h3>
+    <div class="alert alert-warning" style="font-size:13px;">
+      只有在库、待入库样本可以补打标签。已出库、已报废样本无法补打。
+    </div>
+    <div class="form-group"><label>补打原因 *</label>
+      <select id="rp-reason">
+        <option value="">请选择或填写原因</option>
+        <option value="标签损坏">标签损坏</option>
+        <option value="标签模糊">标签模糊</option>
+        <option value="标签遗失">标签遗失</option>
+        <option value="信息更新">信息更新</option>
+        <option value="其他">其他</option>
+      </select>
+    </div>
+    <div class="form-group" id="rp-reason-custom" style="display:none;">
+      <label>请输入具体原因 *</label>
+      <input id="rp-reason-text" placeholder="请输入具体原因">
+    </div>
+    <div class="form-group"><label>补打份数 *</label>
+      <input id="rp-copies" type="number" min="1" max="100" value="1">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="doReprintLabel()">确认补打</button>
+    </div>
+  `);
+  setTimeout(() => {
+    document.getElementById('rp-reason').addEventListener('change', function() {
+      document.getElementById('rp-reason-custom').style.display = this.value === '其他' ? 'block' : 'none';
+    });
+  }, 100);
+}
+
+function doReprintLabel() {
+  const reasonSelect = document.getElementById('rp-reason');
+  const reasonText = document.getElementById('rp-reason-text');
+  let reason = reasonSelect.value;
+  if (reason === '其他') {
+    reason = reasonText.value.trim();
+  }
+  const copies = parseInt(document.getElementById('rp-copies').value) || 1;
+
+  if (!reason) {
+    alertMsg('请填写补打原因', 'error');
+    return;
+  }
+
+  api(`/api/samples/${currentSampleId}/reprint-label`, {
+    method: 'POST',
+    body: { reason, copies }
+  }).then(res => {
+    if (res.success) {
+      alertMsg('补打成功');
+      closeModal();
+      showLabelPreview(res.data.label_preview);
+      if (currentSample) viewDetail(currentSampleId);
+      loadSamples();
+    } else if (res.duplicate_warning) {
+      if (confirm(`${res.error}\n\n是否继续提交？`)) {
+        api(`/api/samples/${currentSampleId}/reprint-label`, {
+          method: 'POST',
+          body: { reason: reason + ' (确认重复)', copies }
+        }).then(res2 => {
+          if (res2.success) {
+            alertMsg('补打成功');
+            closeModal();
+            showLabelPreview(res2.data.label_preview);
+            if (currentSample) viewDetail(currentSampleId);
+            loadSamples();
+          } else {
+            alertMsg(res2.error, 'error');
+          }
+        });
+      }
+    } else {
+      alertMsg(res.error, 'error');
+    }
+  });
+}
+
+function showLabelPreview(label) {
+  const copies = label.copies || 1;
+  let labelsHtml = '';
+  for (let i = 0; i < copies; i++) {
+    labelsHtml += `
+      <div style="border:2px dashed #374151;padding:20px;margin-bottom:20px;background:white;border-radius:8px;">
+        <div style="text-align:center;margin-bottom:12px;">
+          <div style="font-size:12px;color:#6b7280;">冷链样本追踪系统</div>
+          <div style="font-size:20px;font-weight:bold;color:#1e3a5f;margin-top:4px;">样本标签</div>
+        </div>
+        <div style="text-align:center;margin:16px 0;">
+          <div style="font-family: 'Courier New', monospace;font-size:28px;font-weight:bold;letter-spacing:2px;">
+            ${label.barcode}
+          </div>
+          <div style="font-size:11px;color:#6b7280;margin-top:4px;">条码</div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:14px;">
+          <tr>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;width:80px;">批次号</td>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;font-weight:600;">${label.batch_no}</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;">样本名</td>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;font-weight:600;">${label.sample_name || '-'}</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;">温区</td>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;font-weight:600;">${label.zone_name || '-'}</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;">库位</td>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;font-weight:600;">${label.location_code || '-'}</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;">补打时间</td>
+            <td style="padding:6px 0;border-bottom:1px solid #e5e7eb;font-weight:600;">${label.reprint_time}</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 0;color:#6b7280;">操作人</td>
+            <td style="padding:6px 0;font-weight:600;">${label.operator_name}</td>
+          </tr>
+        </table>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px dashed #d1d5db;text-align:center;font-size:12px;color:#6b7280;">
+          补打原因: ${label.reason} | 第 ${i + 1}/${copies} 份
+        </div>
+      </div>
+    `;
+  }
+
+  showModal(`
+    <h3>标签预览</h3>
+    <div style="max-height:60vh;overflow-y:auto;padding:10px;background:#f3f4f6;border-radius:8px;">
+      ${labelsHtml}
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">关闭</button>
+      <button class="btn btn-primary" onclick="window.print()">🖨️ 打印标签</button>
+    </div>
+  `);
+}
+
+let currentLabelReprintsPage = 1;
+
+function loadLabelReprints() {
+  const barcode = document.getElementById('lr-barcode') ? document.getElementById('lr-barcode').value : '';
+  const batch_no = document.getElementById('lr-batch') ? document.getElementById('lr-batch').value : '';
+  const params = new URLSearchParams({
+    barcode,
+    batch_no,
+    page: currentLabelReprintsPage,
+    page_size: 20
+  }).toString();
+
+  api('/api/label-reprints?' + params).then(res => {
+    if (!res.success) return;
+    const tbody = document.querySelector('#label-reprints-table tbody');
+    const { list, total, page, page_size } = res.data;
+
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="11" class="empty-state">暂无补打记录</td></tr>';
+    } else {
+      tbody.innerHTML = list.map(r => `
+        <tr>
+          <td>${r.id}</td>
+          <td><strong>${r.sample_barcode}</strong></td>
+          <td>${r.batch_no}</td>
+          <td>${r.sample_name || '-'}</td>
+          <td>${r.zone_name || '-'}</td>
+          <td>${r.location_code || '-'}</td>
+          <td>${r.reason}</td>
+          <td><span class="badge badge-primary">${r.copies}</span></td>
+          <td>${r.operator_name}</td>
+          <td>${r.reprint_time}</td>
+          <td>
+            <button class="btn btn-sm btn-secondary" onclick="viewReprintDetail(${r.id})">查看</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    const totalPages = Math.ceil(total / page_size);
+    const paginationEl = document.getElementById('lr-pagination');
+    if (paginationEl) {
+      let paginationHtml = `<span style="margin-right:16px;">共 ${total} 条，第 ${page}/${totalPages} 页</span>`;
+      if (page > 1) {
+        paginationHtml += `<button class="btn btn-sm btn-secondary" onclick="currentLabelReprintsPage=${page - 1};loadLabelReprints();">上一页</button>`;
+      }
+      if (page < totalPages) {
+        paginationHtml += `<button class="btn btn-sm btn-secondary" onclick="currentLabelReprintsPage=${page + 1};loadLabelReprints();" style="margin-left:8px;">下一页</button>`;
+      }
+      paginationEl.innerHTML = paginationHtml;
+    }
+  });
+}
+
+function viewReprintDetail(id) {
+  api('/api/label-reprints?page=1&page_size=1000').then(res => {
+    if (!res.success) return;
+    const record = res.data.list.find(r => r.id === id);
+    if (record) {
+      showLabelPreview({
+        ...record,
+        sample_name: record.sample_name,
+        reprint_time: record.reprint_time,
+        operator_name: record.operator_name
+      });
+    }
+  });
+}
+
+function exportLabelReprintsCSV() {
+  const barcode = document.getElementById('lr-barcode') ? document.getElementById('lr-barcode').value : '';
+  const batch_no = document.getElementById('lr-batch') ? document.getElementById('lr-batch').value : '';
+  const params = new URLSearchParams({ barcode, batch_no }).toString();
+  window.location.href = '/api/label-reprints/export/csv?' + params;
 }
 
 function showInboundModal() {

@@ -19,6 +19,9 @@
 - **👥 角色权限控制**: 普通库管只能提交盘点和异常说明，管理员才能确认纠错、撤销操作
 - **↩️ 操作撤销**: 支持撤销未出库的错误转移或报废动作，不抹掉原时间线，追加反向记录并恢复库位或状态
 - **📜 完整历史查询**: 按条码、批次、盘点单号查询完整历史，重启后数据不丢失
+- **🏷️ 标签补打**: 管理员和库管员可给在库、待入库样本发起标签补打，填写原因和份数，生成可打印的标签预览
+- **⏱️ 防重复提交**: 同一样本1分钟内同一原因重复提交自动拦截，避免误点连打
+- **🔍 补打记录管理**: 支持按条码、批次筛选补打记录，可导出 CSV，审计日志和时间线永久留存
 
 ---
 
@@ -518,6 +521,33 @@ CREATE TABLE IF NOT EXISTS user_zone_access (
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_user_zone_access_user ON user_zone_access(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_zone_access_zone ON user_zone_access(zone_id);
+
+-- 标签补打记录表
+CREATE TABLE IF NOT EXISTS sample_label_reprints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sample_id INTEGER NOT NULL,
+  sample_barcode TEXT NOT NULL,
+  batch_no TEXT NOT NULL,
+  sample_name TEXT,
+  zone_id INTEGER,
+  zone_name TEXT,
+  location_id INTEGER,
+  location_code TEXT,
+  location_name TEXT,
+  reason TEXT NOT NULL,
+  copies INTEGER NOT NULL DEFAULT 1,
+  operator_id INTEGER NOT NULL,
+  operator_name TEXT NOT NULL,
+  reprint_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_label_reprints_sample ON sample_label_reprints(sample_id);
+CREATE INDEX IF NOT EXISTS idx_label_reprints_barcode ON sample_label_reprints(sample_barcode);
+CREATE INDEX IF NOT EXISTS idx_label_reprints_batch ON sample_label_reprints(batch_no);
+CREATE INDEX IF NOT EXISTS idx_label_reprints_operator ON sample_label_reprints(operator_id);
+CREATE INDEX IF NOT EXISTS idx_label_reprints_time ON sample_label_reprints(reprint_time);
 ```
 
 **预置绑定**：

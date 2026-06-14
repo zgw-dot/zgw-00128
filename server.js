@@ -2,7 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
-const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx, insertAuditLog, insertAuditLogInTx, getUserZoneIds } = require('./db');
+const { initDatabase, queryAll, queryOne, run, runExec, runTransaction, runInTx, getLastInsertIdInTx, insertAuditLog, insertAuditLogInTx, getUserZoneIds, insertLabelReprint, insertLabelReprintInTx, checkRecentReprint, getLabelReprints, getLabelReprintsCount } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -34,7 +34,8 @@ const ACTION_LABELS = {
   inventory_correction: '盘点纠错',
   reserved_outbound: '预约出库',
   borrow_out: '领用出库',
-  borrow_return: '领用归还'
+  borrow_return: '领用归还',
+  label_reprint: '标签补打'
 };
 
 const RESERVATION_STATUS_LABELS = {
@@ -101,7 +102,8 @@ const AUDIT_ACTION_LABELS = {
   borrowing_create: '创建领用',
   borrowing_borrow: '确认借出',
   borrowing_return: '归还样本',
-  borrowing_overdue: '领用逾期'
+  borrowing_overdue: '领用逾期',
+  label_reprint: '标签补打'
 };
 
 const AUDIT_OBJECT_LABELS = {
@@ -114,7 +116,8 @@ const AUDIT_OBJECT_LABELS = {
   inventory_config: '库存配置',
   item_threshold: '物品阈值',
   sample_reservation: '样本预约',
-  sample_borrowing: '样本领用'
+  sample_borrowing: '样本领用',
+  label_reprint: '标签补打'
 };
 
 let currentUser = null;
@@ -3651,6 +3654,212 @@ app.put('/api/borrowings/:id/return', requireWrite, (req, res) => {
   } catch (e) {
     res.json({ success: false, error: e.message });
   }
+});
+
+app.post('/api/samples/:id/reprint-label', requireWrite, (req, res) => {
+  const { id } = req.params;
+  const { reason, copies } = req.body;
+
+  if (!reason || !reason.trim()) {
+    return res.json({ success: false, error: '补打原因必填' });
+  }
+
+  const copiesNum = parseInt(copies);
+  if (isNaN(copiesNum) || copiesNum < 1 || copiesNum > 100) {
+    return res.json({ success: false, error: '补打份数必须在 1-100 之间' });
+  }
+
+  const sample = getSampleWithDetails(id);
+  if (!sample) {
+    return res.json({ success: false, error: '样本不存在' });
+  }
+
+  if (!canAccessSample(id)) {
+    return res.json({ success: false, error: '无权操作该样本', forbidden: true });
+  }
+
+  if (sample.status === 'outbound' || sample.status === 'scrapped') {
+    return res.json({
+      success: false,
+      error: `样本状态为"${STATUS_LABELS[sample.status] || sample.status}"，不能补打标签`
+    });
+  }
+
+  if (sample.status !== 'in_storage' && sample.status !== 'pending') {
+    return res.json({
+      success: false,
+      error: `样本状态为"${STATUS_LABELS[sample.status] || sample.status}"，只有在库、待入库样本才能补打标签`
+    });
+  }
+
+  const reasonTrimmed = reason.trim();
+  const recentReprint = checkRecentReprint(id, reasonTrimmed);
+  if (recentReprint) {
+    return res.json({
+      success: false,
+      error: '同一样本60秒内使用相同原因重复提交，请确认是否需要补打',
+      duplicate_warning: true
+    });
+  }
+
+  const operatorName = currentUser.real_name || currentUser.username;
+  const operatorId = currentUser.id;
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const reprintTime = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+  let zoneId = null;
+  let zoneName = null;
+  let locationId = null;
+  let locationCode = null;
+  let locationName = null;
+
+  if (sample.current_location_id) {
+    const loc = getLocationWithZone(sample.current_location_id);
+    if (loc) {
+      zoneId = loc.zone_id;
+      zoneName = loc.zone_name;
+      locationId = loc.id;
+      locationCode = loc.code;
+      locationName = loc.name;
+    }
+  } else if (sample.required_zone_id) {
+    const zone = queryOne('SELECT * FROM temperature_zones WHERE id = ?', [sample.required_zone_id]);
+    if (zone) {
+      zoneId = zone.id;
+      zoneName = zone.name;
+    }
+  }
+
+  try {
+    let reprintId = null;
+    runTransaction(() => {
+      const result = insertLabelReprintInTx({
+        sample_id: id,
+        sample_barcode: sample.barcode,
+        batch_no: sample.batch_no,
+        sample_name: sample.name,
+        zone_id: zoneId,
+        zone_name: zoneName,
+        location_id: locationId,
+        location_code: locationCode,
+        location_name: locationName,
+        reason: reasonTrimmed,
+        copies: copiesNum,
+        operator_id: operatorId,
+        operator_name: operatorName,
+        reprint_time: reprintTime
+      });
+      reprintId = result.lastInsertRowid;
+
+      addTimelineInTx(id, 'label_reprint', locationId, locationId, null,
+        `标签补打：${reasonTrimmed}，${copiesNum}份`, operatorName);
+
+      addAuditLogInTx(req, 'label_reprint', 'label_reprint', String(reprintId),
+        null,
+        {
+          id: reprintId,
+          sample_id: id,
+          barcode: sample.barcode,
+          batch_no: sample.batch_no,
+          reason: reasonTrimmed,
+          copies: copiesNum,
+          reprint_time: reprintTime,
+          operator_name: operatorName
+        },
+        `补打标签：样本 ${sample.barcode}，原因：${reasonTrimmed}，${copiesNum}份`);
+    });
+
+    const labelPreview = {
+      id: reprintId,
+      barcode: sample.barcode,
+      batch_no: sample.batch_no,
+      sample_name: sample.name,
+      zone_name: zoneName || sample.required_zone_name || '',
+      location_code: locationCode || '待入库',
+      location_name: locationName || '',
+      reprint_time: reprintTime,
+      operator_name: operatorName,
+      reason: reasonTrimmed,
+      copies: copiesNum
+    };
+
+    res.json({
+      success: true,
+      data: {
+        reprint_id: reprintId,
+        label_preview: labelPreview
+      }
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/label-reprints', requireAuth, (req, res) => {
+  const { barcode, batch_no, page, page_size } = req.query;
+
+  const accessibleZones = getAccessibleZoneIds();
+
+  const filters = {
+    barcode: barcode || '',
+    batch_no: batch_no || '',
+    page: parseInt(page) || 1,
+    page_size: parseInt(page_size) || 20,
+    accessible_zones: accessibleZones
+  };
+
+  const total = getLabelReprintsCount(filters);
+  const list = getLabelReprints(filters);
+
+  res.json({
+    success: true,
+    data: {
+      list,
+      total,
+      page: filters.page,
+      page_size: filters.page_size
+    }
+  });
+});
+
+app.get('/api/label-reprints/export/csv', requireAuth, (req, res) => {
+  const { barcode, batch_no } = req.query;
+
+  const accessibleZones = getAccessibleZoneIds();
+
+  const filters = {
+    barcode: barcode || '',
+    batch_no: batch_no || '',
+    accessible_zones: accessibleZones
+  };
+
+  const list = getLabelReprints(filters);
+
+  const header = ['ID', '条码', '批次号', '样本名称', '温区', '库位编码', '库位名称', '补打原因', '份数', '操作人', '补打时间'];
+  const lines = [header.join(',')];
+
+  list.forEach(r => {
+    lines.push([
+      r.id,
+      `"${r.sample_barcode || ''}"`,
+      `"${r.batch_no || ''}"`,
+      `"${r.sample_name || ''}"`,
+      `"${r.zone_name || ''}"`,
+      `"${r.location_code || ''}"`,
+      `"${r.location_name || ''}"`,
+      `"${(r.reason || '').replace(/"/g, '""')}"`,
+      r.copies || 1,
+      `"${r.operator_name || ''}"`,
+      `"${r.reprint_time || ''}"`
+    ].join(','));
+  });
+
+  const csv = '\ufeff' + lines.join('\r\n');
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="label_reprints_${timestamp}.csv"`);
+  res.send(csv);
 });
 
 initDatabase().then(() => {

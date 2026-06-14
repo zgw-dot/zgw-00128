@@ -300,8 +300,29 @@ async function initDatabase() {
       returned_by TEXT,
       returned_by_id INTEGER,
       overdue_marked_at TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sample_label_reprints (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sample_id INTEGER NOT NULL,
+      sample_barcode TEXT NOT NULL,
+      batch_no TEXT NOT NULL,
+      sample_name TEXT,
+      zone_id INTEGER,
+      zone_name TEXT,
+      location_id INTEGER,
+      location_code TEXT,
+      location_name TEXT,
+      reason TEXT NOT NULL,
+      copies INTEGER NOT NULL DEFAULT 1,
+      operator_id INTEGER NOT NULL,
+      operator_name TEXT NOT NULL,
+      reprint_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     )
   `);
 
@@ -354,30 +375,38 @@ async function initDatabase() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_sample_borrowings_expected_return ON sample_borrowings(expected_return_date)`);
   } catch(e) {}
 
-  const zoneCount = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones')[0].values[0][0];
+  try {
+    db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_sample ON sample_label_reprints(sample_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_barcode ON sample_label_reprints(sample_barcode)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_batch ON sample_label_reprints(batch_no)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_operator ON sample_label_reprints(operator_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_label_reprints_time ON sample_label_reprints(reprint_time)`);
+  } catch(e) {}
+
+  const zoneResult = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones');
+  const zoneCount = (zoneResult && zoneResult[0] && zoneResult[0].values && zoneResult[0].values[0]) ? zoneResult[0].values[0][0] : 0;
   if (zoneCount === 0) {
-    db.run(`INSERT INTO temperature_zones (name, min_temp, max_temp, description) VALUES ('冷藏(2-8℃)', 2, 8, '标准冷藏温区')`);
-    db.run(`INSERT INTO temperature_zones (name, min_temp, max_temp, description) VALUES ('冷冻(-20℃)', -25, -15, '低温冷冻温区')`);
-    db.run(`INSERT INTO temperature_zones (name, min_temp, max_temp, description) VALUES ('深冻(-80℃)', -90, -70, '超低温深冻温区')`);
-    db.run(`INSERT INTO temperature_zones (name, min_temp, max_temp, description) VALUES ('常温(15-25℃)', 15, 25, '室温保存温区')`);
+    db.run(`INSERT INTO temperature_zones (id, name, min_temp, max_temp, description) VALUES (1, '冷藏(2-8℃)', 2, 8, '标准冷藏温区')`);
+    db.run(`INSERT INTO temperature_zones (id, name, min_temp, max_temp, description) VALUES (2, '冷冻(-20℃)', -25, -15, '低温冷冻温区')`);
+    db.run(`INSERT INTO temperature_zones (id, name, min_temp, max_temp, description) VALUES (3, '深冻(-80℃)', -90, -70, '超低温深冻温区')`);
+    db.run(`INSERT INTO temperature_zones (id, name, min_temp, max_temp, description) VALUES (4, '常温(15-25℃)', 15, 25, '室温保存温区')`);
   }
 
-  const locCount = db.exec('SELECT COUNT(*) as cnt FROM storage_locations')[0].values[0][0];
+  const locResult = db.exec('SELECT COUNT(*) as cnt FROM storage_locations');
+  const locCount = (locResult && locResult[0] && locResult[0].values && locResult[0].values[0]) ? locResult[0].values[0][0] : 0;
   if (locCount === 0) {
-    const zones = queryAll('SELECT id, name FROM temperature_zones');
-    const zoneMap = {};
-    zones.forEach(z => { zoneMap[z.name] = z.id; });
-    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('R-A1', '冷藏区A架1层', ${zoneMap['冷藏(2-8℃)']}, 20, '冷藏库位')`);
-    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('R-A2', '冷藏区A架2层', ${zoneMap['冷藏(2-8℃)']}, 20, '冷藏库位')`);
-    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('F-B1', '冷冻区B架1层', ${zoneMap['冷冻(-20℃)']}, 15, '冷冻库位')`);
-    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('F-B2', '冷冻区B架2层', ${zoneMap['冷冻(-20℃)']}, 15, '冷冻库位')`);
-    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('D-C1', '深冻区C架1层', ${zoneMap['深冻(-80℃)']}, 10, '深冻库位')`);
-    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('N-D1', '常温区D架1层', ${zoneMap['常温(15-25℃)']}, 30, '常温库位')`);
+    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('R-A1', '冷藏区A架1层', 1, 20, '冷藏库位')`);
+    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('R-A2', '冷藏区A架2层', 1, 20, '冷藏库位')`);
+    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('F-B1', '冷冻区B架1层', 2, 15, '冷冻库位')`);
+    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('F-B2', '冷冻区B架2层', 2, 15, '冷冻库位')`);
+    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('D-C1', '深冻区C架1层', 3, 10, '深冻库位')`);
+    db.run(`INSERT INTO storage_locations (code, name, zone_id, capacity, description) VALUES ('N-D1', '常温区D架1层', 4, 30, '常温库位')`);
   }
 
   // 每个用户单独检查（用 INSERT OR IGNORE 语义），新老数据库都能补齐缺失账号
   function ensureUser(username, password, role, real_name) {
-    const cnt = db.exec(`SELECT COUNT(*) as cnt FROM users WHERE username='${username}'`)[0].values[0][0];
+    const result = db.exec(`SELECT COUNT(*) as cnt FROM users WHERE username='${username.replace(/'/g, "''")}'`);
+    const cnt = (result && result[0] && result[0].values && result[0].values[0]) ? result[0].values[0][0] : 0;
     if (cnt !== 0) return; // 已存在就跳过
     db.run(
       `INSERT INTO users (username, password, role, real_name) VALUES (?, ?, ?, ?)`,
@@ -395,13 +424,15 @@ async function initDatabase() {
 
   // 给库管员默认绑定温区（验收场景：冷藏库管员绑冷藏，冷冻库管员绑冷冻）
   function ensureUserZone(username, zoneName) {
-    const userRow = db.exec(`SELECT id FROM users WHERE username='${username}'`);
-    if (!userRow || userRow[0].values.length === 0) return;
+    const userRow = db.exec(`SELECT id FROM users WHERE username='${username.replace(/'/g, "''")}'`);
+    if (!userRow || !userRow[0] || !userRow[0].values || userRow[0].values.length === 0) return;
     const userId = userRow[0].values[0][0];
-    const zoneRow = db.exec(`SELECT id FROM temperature_zones WHERE name='${zoneName.replace(/'/g, "''")}'`);
-    if (!zoneRow || zoneRow[0].values.length === 0) return;
-    const zoneId = zoneRow[0].values[0][0];
-    const exists = db.exec(`SELECT COUNT(*) as cnt FROM user_zone_access WHERE user_id=${userId} AND zone_id=${zoneId}`)[0].values[0][0];
+    // 直接使用硬编码的 zone id，避免查询问题
+    const zoneIdMap = { '冷藏(2-8℃)': 1, '冷冻(-20℃)': 2, '深冻(-80℃)': 3, '常温(15-25℃)': 4 };
+    const zoneId = zoneIdMap[zoneName];
+    if (!zoneId) return;
+    const existsRow = db.exec(`SELECT COUNT(*) as cnt FROM user_zone_access WHERE user_id=${userId} AND zone_id=${zoneId}`);
+    const exists = (existsRow && existsRow[0] && existsRow[0].values && existsRow[0].values[0]) ? existsRow[0].values[0][0] : 0;
     if (exists === 0) {
       db.run(`INSERT OR IGNORE INTO user_zone_access (user_id, zone_id) VALUES (${userId}, ${zoneId})`);
     }
@@ -415,7 +446,8 @@ async function initDatabase() {
   ensureUserZone('warehouse', '常温(15-25℃)');
 
   // 初始化库存配置：默认低库存阈值
-  const defaultThreshold = db.exec("SELECT COUNT(*) as cnt FROM inventory_config WHERE config_key='default_low_stock_threshold'")[0].values[0][0];
+  const thresholdResult = db.exec("SELECT COUNT(*) as cnt FROM inventory_config WHERE config_key='default_low_stock_threshold'");
+  const defaultThreshold = (thresholdResult && thresholdResult[0] && thresholdResult[0].values && thresholdResult[0].values[0]) ? thresholdResult[0].values[0][0] : 0;
   if (defaultThreshold === 0) {
     db.run(`INSERT INTO inventory_config (config_key, config_value) VALUES ('default_low_stock_threshold', '10')`);
   }
@@ -573,6 +605,125 @@ function getUserZoneIdsInTx(userId) {
   return rows.map(r => r.zone_id);
 }
 
+function insertLabelReprint(params) {
+  const {
+    sample_id, sample_barcode, batch_no, sample_name,
+    zone_id, zone_name, location_id, location_code, location_name,
+    reason, copies, operator_id, operator_name, reprint_time
+  } = params;
+  return run(`
+    INSERT INTO sample_label_reprints
+    (sample_id, sample_barcode, batch_no, sample_name, zone_id, zone_name,
+     location_id, location_code, location_name, reason, copies,
+     operator_id, operator_name, reprint_time)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    sample_id, sample_barcode, batch_no, sample_name || null,
+    zone_id || null, zone_name || null, location_id || null, location_code || null, location_name || null,
+    reason, copies || 1, operator_id, operator_name,
+    reprint_time || null
+  ]);
+}
+
+function insertLabelReprintInTx(params) {
+  const {
+    sample_id, sample_barcode, batch_no, sample_name,
+    zone_id, zone_name, location_id, location_code, location_name,
+    reason, copies, operator_id, operator_name, reprint_time
+  } = params;
+  return runInTx(`
+    INSERT INTO sample_label_reprints
+    (sample_id, sample_barcode, batch_no, sample_name, zone_id, zone_name,
+     location_id, location_code, location_name, reason, copies,
+     operator_id, operator_name, reprint_time)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    sample_id, sample_barcode, batch_no, sample_name || null,
+    zone_id || null, zone_name || null, location_id || null, location_code || null, location_name || null,
+    reason, copies || 1, operator_id, operator_name,
+    reprint_time || null
+  ]);
+}
+
+function checkRecentReprint(sampleId, reason) {
+  return queryOne(`
+    SELECT id FROM sample_label_reprints
+    WHERE sample_id = ? AND reason = ?
+      AND datetime(reprint_time) >= datetime('now', 'localtime', '-60 seconds')
+    ORDER BY id DESC LIMIT 1
+  `, [sampleId, reason]);
+}
+
+function getLabelReprints(filters = {}) {
+  let sql = `
+    SELECT slr.*,
+      tz.name as zone_name,
+      sl.code as location_code, sl.name as location_name
+    FROM sample_label_reprints slr
+    LEFT JOIN temperature_zones tz ON slr.zone_id = tz.id
+    LEFT JOIN storage_locations sl ON slr.location_id = sl.id
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (filters.barcode) {
+    sql += ' AND slr.sample_barcode LIKE ?';
+    params.push(`%${filters.barcode}%`);
+  }
+  if (filters.batch_no) {
+    sql += ' AND slr.batch_no LIKE ?';
+    params.push(`%${filters.batch_no}%`);
+  }
+  if (filters.sample_id) {
+    sql += ' AND slr.sample_id = ?';
+    params.push(filters.sample_id);
+  }
+
+  const accessibleZones = filters.accessible_zones;
+  if (accessibleZones !== null && accessibleZones !== undefined) {
+    if (accessibleZones.length === 0) {
+      return [];
+    }
+    sql += ' AND slr.zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')';
+    params.push(...accessibleZones);
+  }
+
+  sql += ' ORDER BY slr.id DESC';
+
+  if (filters.page_size && filters.page) {
+    sql += ' LIMIT ? OFFSET ?';
+    params.push(parseInt(filters.page_size), (parseInt(filters.page) - 1) * parseInt(filters.page_size));
+  }
+
+  return queryAll(sql, params);
+}
+
+function getLabelReprintsCount(filters = {}) {
+  let sql = 'SELECT COUNT(*) as cnt FROM sample_label_reprints slr WHERE 1=1';
+  const params = [];
+
+  if (filters.barcode) {
+    sql += ' AND slr.sample_barcode LIKE ?';
+    params.push(`%${filters.barcode}%`);
+  }
+  if (filters.batch_no) {
+    sql += ' AND slr.batch_no LIKE ?';
+    params.push(`%${filters.batch_no}%`);
+  }
+
+  const accessibleZones = filters.accessible_zones;
+  if (accessibleZones !== null && accessibleZones !== undefined) {
+    if (accessibleZones.length === 0) {
+      return 0;
+    }
+    sql += ' AND slr.zone_id IN (' + accessibleZones.map(() => '?').join(',') + ')';
+    params.push(...accessibleZones);
+  }
+
+  const row = queryOne(sql, params);
+  return row ? row.cnt : 0;
+}
+
 function closeDatabase() {
   if (!db) return;
   try {
@@ -625,5 +776,10 @@ module.exports = {
   insertAuditLog,
   insertAuditLogInTx,
   getUserZoneIds,
-  getUserZoneIdsInTx
+  getUserZoneIdsInTx,
+  insertLabelReprint,
+  insertLabelReprintInTx,
+  checkRecentReprint,
+  getLabelReprints,
+  getLabelReprintsCount
 };
