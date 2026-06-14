@@ -48,14 +48,21 @@ function check(name, cond, detail) {
   else      { failed++; console.log('  \u2717 ' + name + (detail ? ' — ' + detail : '')); }
 }
 
+const runTag = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const SEED_BC   = 'SEED-'  + runTag;
+const EMPTY_BC  = 'EMPTY-' + runTag;
+const BADZONE_BC = 'BADZ-' + runTag;
+const SEED_BATCH = 'LOT-SEED-' + runTag;
+const BAD_BATCH  = 'LOT-BAD-'  + runTag;
+
 async function run() {
-  console.log('[1/6] Login admin');
+  console.log('[1/6] Login admin (runTag=' + runTag + ')');
   const login = await post('/api/auth/login', { username: 'admin', password: 'admin123' });
   check('admin 登录成功', login.success);
 
-  console.log('\n[2/6] 先插入 1 条对照样本: 条码 SEED01');
+  console.log('\n[2/6] 先插入 1 条对照样本: 条码 ' + SEED_BC);
   const seed = await post('/api/samples/import/csv', {
-    rows: [{ barcode: 'SEED01', batch_no: 'LOT-SEED', name: 'Seed', required_zone: '冷藏(2-8℃)' }]
+    rows: [{ barcode: SEED_BC, batch_no: SEED_BATCH, name: 'Seed-' + runTag, required_zone: '冷藏(2-8℃)' }]
   });
   check('种子样本导入成功', seed.success && seed.data.success === 1);
   const seedBatchId = seed.data.batch_id;
@@ -63,9 +70,9 @@ async function run() {
   console.log('\n[3/6] 批量导入 3 条有校验错误的 CSV');
   const bad = await post('/api/samples/import/csv', {
     rows: [
-      { barcode: 'SEED01',         batch_no: 'LOT-BAD', name: '重复条码',  required_zone: '冷藏(2-8℃)'      },
-      { barcode: 'EMPTY_BATCH',    batch_no: '',        name: '空批次',    required_zone: '冷藏(2-8℃)'      },
-      { barcode: 'BAD_ZONE',       batch_no: 'LOT-BAD', name: '无效温区',  required_zone: '不存在的温区'      }
+      { barcode: SEED_BC,      batch_no: BAD_BATCH,  name: '重复条码',  required_zone: '冷藏(2-8℃)'      },
+      { barcode: EMPTY_BC,     batch_no: '',         name: '空批次',    required_zone: '冷藏(2-8℃)'      },
+      { barcode: BADZONE_BC,   batch_no: BAD_BATCH,  name: '无效温区',  required_zone: '不存在的温区'      }
     ]
   });
 
@@ -123,9 +130,9 @@ async function run() {
     const r = await get('/api/samples/barcode/' + encodeURIComponent(bc));
     return r.success;
   }
-  check('SEED01 仍在',            await hasBarcode('SEED01'));
-  check('EMPTY_BATCH 未入库',     !(await hasBarcode('EMPTY_BATCH')));
-  check('BAD_ZONE 未入库',        !(await hasBarcode('BAD_ZONE')));
+  check(SEED_BC + ' 仍在',            await hasBarcode(SEED_BC));
+  check(EMPTY_BC + ' 未入库',         !(await hasBarcode(EMPTY_BC)));
+  check(BADZONE_BC + ' 未入库',       !(await hasBarcode(BADZONE_BC)));
 
   console.log('\n[6/6] 验证成功分支提示不退化');
   const tag = 'T' + Date.now().toString(36);
