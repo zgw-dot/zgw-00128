@@ -1,0 +1,91 @@
+{
+  "runId": "mqd4db170mo",
+  "createdAt": "2026-06-14T01:42:30.427Z",
+  "barcodes": {
+    "S1": "INV-mqd4db170mo-S1",
+    "S2": "INV-mqd4db170mo-S2",
+    "S3": "INV-mqd4db170mo-S3",
+    "S4": "INV-mqd4db170mo-S4",
+    "S5": "INV-mqd4db170mo-S5",
+    "EXTRA": "INV-mqd4db170mo-EXTRA",
+    "SCRAP": "INV-mqd4db170mo-SCRAP"
+  },
+  "batches": {
+    "main": "BATCH-mqd4db170mo",
+    "extra": "BATCH-EXTRA-mqd4db170mo",
+    "scrap": "BATCH-SCRAP-mqd4db170mo"
+  },
+  "sampleIds": {
+    "S1": 101,
+    "S2": 102,
+    "S3": 103,
+    "S4": 104,
+    "S5": 105,
+    "EXTRA": 106,
+    "SCRAP": 107
+  },
+  "inventoryOrderId": 17,
+  "inventoryOrderNo": "PD202606145887",
+  "discrepancyIds": {
+    "mislocated": 198,
+    "extra": 200,
+    "missing": 217,
+    "outbound_scanned": 199
+  },
+  "transferTimelineId": 298,
+  "scrapTimelineId": 303,
+  "locations": {
+    "main": {
+      "id": 8,
+      "code": "TEST-mqcpc9it076-A"
+    },
+    "alt": {
+      "id": 7,
+      "code": "TEST-mqcpc9it076-M"
+    }
+  },
+  "discrepancyIdsByBarcode": {
+    "INV-mqd4db170mo-S3": 198,
+    "INV-mqd4db170mo-S5": 199,
+    "INV-mqd4db170mo-EXTRA": 200,
+    "INV-mqcpc9it076-S2": 201,
+    "INV-mqcpc9it076-S4": 202,
+    "INV-mqcpc9it076-SCRAP": 203,
+    "INV-mqcpc9ty06x-S3": 204,
+    "INV-mqcpeyku0ai-S2": 205,
+    "INV-mqcpeyku0ai-S4": 206,
+    "INV-mqcpeyku0ai-SCRAP": 207,
+    "INV-mqcpeyzs00h-S3": 208,
+    "INV-mqcpfnjn0bi-S2": 209,
+    "INV-mqcpfnjn0bi-S4": 210,
+    "INV-mqcpfnjn0bi-SCRAP": 211,
+    "INV-mqcpfo5k0cl-S3": 212,
+    "INV-mqcpobmj07h-S2": 213,
+    "INV-mqcpobmj07h-S4": 214,
+    "INV-mqcpobmj07h-SCRAP": 215,
+    "INV-mqd4d87603a-S3": 216,
+    "INV-mqd4db170mo-S4": 217
+  },
+  "discrepancyTypeByBarcode": {
+    "INV-mqd4db170mo-S3": "mislocated",
+    "INV-mqd4db170mo-S5": "outbound_scanned",
+    "INV-mqd4db170mo-EXTRA": "extra",
+    "INV-mqcpc9it076-S2": "missing",
+    "INV-mqcpc9it076-S4": "missing",
+    "INV-mqcpc9it076-SCRAP": "missing",
+    "INV-mqcpc9ty06x-S3": "missing",
+    "INV-mqcpeyku0ai-S2": "missing",
+    "INV-mqcpeyku0ai-S4": "missing",
+    "INV-mqcpeyku0ai-SCRAP": "missing",
+    "INV-mqcpeyzs00h-S3": "missing",
+    "INV-mqcpfnjn0bi-S2": "missing",
+    "INV-mqcpfnjn0bi-S4": "missing",
+    "INV-mqcpfnjn0bi-SCRAP": "missing",
+    "INV-mqcpfo5k0cl-S3": "missing",
+    "INV-mqcpobmj07h-S2": "missing",
+    "INV-mqcpobmj07h-S4": "missing",
+    "INV-mqcpobmj07h-SCRAP": "missing",
+    "INV-mqd4d87603a-S3": "missing",
+    "INV-mqd4db170mo-S4": "missing"
+  }
+}
