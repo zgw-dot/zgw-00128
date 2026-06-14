@@ -207,6 +207,38 @@ async function initDatabase() {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sample_import_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'processing',
+      operator_id INTEGER,
+      operator_name TEXT,
+      ip_address TEXT,
+      remark TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sample_import_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL,
+      row_number INTEGER NOT NULL,
+      barcode TEXT,
+      batch_no TEXT,
+      name TEXT,
+      required_zone TEXT,
+      status TEXT NOT NULL,
+      failure_reason TEXT,
+      sample_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+
   try {
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_barcode ON samples(barcode)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_status ON samples(status)`);
@@ -229,6 +261,8 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_user_zone_access_user ON user_zone_access(user_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_user_zone_access_zone ON user_zone_access(zone_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_import_batches_status ON sample_import_batches(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_import_results_batch ON sample_import_results(batch_id)`);
   } catch(e) {}
 
   const zoneCount = db.exec('SELECT COUNT(*) as cnt FROM temperature_zones')[0].values[0][0];
