@@ -3301,10 +3301,22 @@ function markOverdueBorrowings() {
 }
 
 app.post('/api/borrowings', requireWrite, (req, res) => {
-  const { sample_barcode, expected_return_date, purpose, remark } = req.body;
+  const { sample_barcode, expected_return_date, purpose, remark, borrower_id } = req.body;
 
   if (!sample_barcode) return res.json({ success: false, error: '样本条码必填' });
   if (!expected_return_date) return res.json({ success: false, error: '预计归还日期必填' });
+
+  let targetBorrowerId = currentUser.id;
+  let targetBorrowerName = currentUser.real_name || currentUser.username;
+
+  if (borrower_id != null && currentUser.role === 'admin') {
+    const borrowerUser = queryOne('SELECT * FROM users WHERE id = ?', [parseInt(borrower_id)]);
+    if (!borrowerUser) {
+      return res.json({ success: false, error: `指定的领用人不存在（id=${borrower_id}）` });
+    }
+    targetBorrowerId = borrowerUser.id;
+    targetBorrowerName = borrowerUser.real_name || borrowerUser.username;
+  }
 
   const sample = queryOne('SELECT * FROM samples WHERE barcode = ?', [sample_barcode]);
   if (!sample) return res.json({ success: false, error: '样本不存在' });
@@ -3333,13 +3345,14 @@ app.post('/api/borrowings', requireWrite, (req, res) => {
        expected_return_date, purpose, status, remark)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)
     `, [borrowingNo, sample.id, sample_barcode,
-        currentUser.real_name || currentUser.username,
-        currentUser.id, expected_return_date, purpose || '', remark || '']);
+        targetBorrowerName, targetBorrowerId,
+        expected_return_date, purpose || '', remark || '']);
 
     addAuditLog(req, 'borrowing_create', 'sample_borrowing', String(info.lastInsertRowid),
       null,
-      { borrowing_no: borrowingNo, sample_barcode, expected_return_date, purpose, status: 'draft' },
-      `创建领用单 ${borrowingNo}：样本 ${sample_barcode}，预计归还 ${expected_return_date}`);
+      { borrowing_no: borrowingNo, sample_barcode, expected_return_date, purpose, status: 'draft',
+        borrower_id: targetBorrowerId, borrower_name: targetBorrowerName },
+      `创建领用单 ${borrowingNo}：样本 ${sample_barcode}，领用人 ${targetBorrowerName}，预计归还 ${expected_return_date}`);
 
     res.json({ success: true, data: { id: info.lastInsertRowid, borrowing_no: borrowingNo } });
   } catch (e) {
